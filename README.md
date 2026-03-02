@@ -1,6 +1,6 @@
 # SnippetsBackend
 
-FastAPI REST backend for [SnippetsCLI](../SnippetsCLI). Connects to PostgreSQL and exposes a JSON API on port 8000.
+FastAPI REST backend for [SnippetsCLI](https://github.com/banglabs-eu/SnippetsCLI). Connects to PostgreSQL and exposes a JSON API on port 8000.
 
 ## Setup
 
