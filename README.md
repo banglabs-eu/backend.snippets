@@ -1,6 +1,6 @@
 # SnippetsBackend
 
-FastAPI REST backend for [SnippetsCLI](../SnippetsCLI). Connects to PostgreSQL, supports multiple users, and exposes a JSON API on port 8000. Accessible from a CLI or web frontend.
+FastAPI REST backend for [SnippetsCLI](../SnippetsCLI). Connects to PostgreSQL and exposes a JSON API on port 8000.
 
 ## Setup
 
@@ -10,12 +10,12 @@ Copy `.env.example` to `.env` and fill in your values:
 
 ```
 DATABASE_URL=postgresql://user:password@host:port/dbname?sslmode=require
-JWT_SECRET=<run: openssl rand -hex 32>
+API_KEY=<run: openssl rand -hex 32>
 ALLOWED_ORIGINS=https://your-frontend.com
 DEBUG=false
 ```
 
-- **JWT_SECRET** — long random string used to sign tokens. Keep it secret.
+- **API_KEY** — all requests must include `Authorization: Bearer <key>`. Leave unset to disable auth (local dev only).
 - **ALLOWED_ORIGINS** — comma-separated list of allowed web origins. Leave empty if only serving a CLI.
 - **DEBUG** — set to `true` to enable `/docs` and `/redoc`.
 
@@ -25,7 +25,7 @@ DEBUG=false
 docker compose up --build
 ```
 
-The backend initialises the schema on startup (safe to run against an existing database — uses `IF NOT EXISTS` throughout, with migration support from v1).
+The backend initialises the schema on startup (safe to run against an existing database — all `CREATE TABLE` statements use `IF NOT EXISTS`).
 
 ### 3. Verify
 
@@ -43,33 +43,11 @@ uvicorn main:app --reload
 
 ## Authentication
 
-All endpoints except `/health`, `/auth/register`, and `/auth/login` require a Bearer token.
-
-### Register
-
-```bash
-curl -X POST https://your-server/auth/register \
-  -H "Content-Type: application/json" \
-  -d '{"email": "you@example.com", "password": "yourpassword"}'
-# {"token": "<jwt>"}
-```
-
-### Login
-
-```bash
-curl -X POST https://your-server/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"email": "you@example.com", "password": "yourpassword"}'
-# {"token": "<jwt>"}
-```
-
-Tokens are valid for 30 days. Include the token in all subsequent requests:
+All endpoints except `/health` require a Bearer token matching your `API_KEY`:
 
 ```
-Authorization: Bearer <token>
+Authorization: Bearer <your-api-key>
 ```
-
-All data (notes, sources, tags) is scoped to the authenticated user. Users cannot access each other's data.
 
 ## API
 
@@ -80,13 +58,6 @@ All endpoints return JSON. Dates are ISO 8601 strings.
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | GET | `/health` | No | Returns `{"status":"ok"}` |
-
-### Auth
-
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| POST | `/auth/register` | No | Create account, returns JWT |
-| POST | `/auth/login` | No | Login, returns JWT |
 
 ### Notes
 
@@ -118,8 +89,6 @@ All endpoints return JSON. Dates are ISO 8601 strings.
 
 ### Source Types
 
-Shared across all users.
-
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/source-types` | All source types |
@@ -127,8 +96,6 @@ Shared across all users.
 | GET | `/source-types/{id}` | Get a source type |
 
 ### Publishers
-
-Shared across all users.
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -161,9 +128,8 @@ Shared across all users.
 
 ```
 main.py          FastAPI app — routes, Pydantic models, lifespan handler
-auth.py          JWT token creation/verification, password hashing
 db.py            Data access layer (psycopg2, all SQL queries)
-schema.sql       PostgreSQL DDL + seed data (v2, with v1 migration)
+schema.sql       PostgreSQL DDL + seed data
 requirements.txt Python dependencies
 Dockerfile
 docker-compose.yml
