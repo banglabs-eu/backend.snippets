@@ -392,6 +392,13 @@ def remove_tag_from_note(conn, note_id: int, tag_id: int):
     conn.commit()
 
 
+def delete_note(conn, note_id: int):
+    cur = conn.cursor()
+    cur.execute("DELETE FROM note_tags WHERE note_id = %s", (note_id,))
+    cur.execute("DELETE FROM notes WHERE id = %s", (note_id,))
+    conn.commit()
+
+
 def get_tags_for_note(conn, note_id: int) -> list[dict]:
     cur = conn.cursor()
     cur.execute(

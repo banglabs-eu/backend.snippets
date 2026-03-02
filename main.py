@@ -223,6 +223,16 @@ def add_tag_to_note(note_id: int, body: AddTagToNoteBody):
     return {"ok": True}
 
 
+@app.delete("/notes/{note_id}")
+def delete_note(note_id: int):
+    conn = get_conn()
+    row = db.get_note(conn, note_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Note not found")
+    db.delete_note(conn, note_id)
+    return {"ok": True}
+
+
 @app.delete("/notes/{note_id}/tags/{tag_id}")
 def remove_tag_from_note(note_id: int, tag_id: int):
     conn = get_conn()
