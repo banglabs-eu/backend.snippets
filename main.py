@@ -23,9 +23,11 @@ load_dotenv(f".env.{os.environ.get('APP_ENV', 'dev')}")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     database_url = os.environ.get("DATABASE_URL", "postgresql://localhost/snippets")
-    app.state.conn = db.init_db(database_url)
+    pool_min = int(os.environ.get("DB_POOL_MIN", "2"))
+    pool_max = int(os.environ.get("DB_POOL_MAX", "10"))
+    app.state.pool = db.init_db(database_url, pool_min, pool_max)
     yield
-    app.state.conn.close()
+    app.state.pool.closeall()
 
 
 _debug = os.environ.get("DEBUG", "false").lower() == "true"
@@ -50,26 +52,33 @@ _PUBLIC_PATHS = {"/health", "/register", "/login"}
 
 
 @app.middleware("http")
-async def jwt_middleware(request: Request, call_next):
-    if request.url.path in _PUBLIC_PATHS or request.method == "OPTIONS":
+async def request_middleware(request: Request, call_next):
+    if request.method == "OPTIONS":
         return await call_next(request)
-    header = request.headers.get("Authorization", "")
-    if not header.startswith("Bearer "):
-        return JSONResponse(status_code=401, content={"detail": "Missing token"})
-    token = header[len("Bearer "):]
+
+    conn = app.state.pool.getconn()
+    request.state.conn = conn
     try:
-        payload = auth.decode_token(token)
-    except jwt.ExpiredSignatureError:
-        return JSONResponse(status_code=401, content={"detail": "Token expired"})
-    except jwt.InvalidTokenError:
-        return JSONResponse(status_code=401, content={"detail": "Invalid token"})
-    conn = app.state.conn
-    if db.is_token_revoked(conn, payload.get("jti", "")):
-        return JSONResponse(status_code=401, content={"detail": "Token revoked"})
-    request.state.user_id = payload["user_id"]
-    request.state.username = payload["username"]
-    request.state.jti = payload.get("jti", "")
-    return await call_next(request)
+        if request.url.path not in _PUBLIC_PATHS:
+            header = request.headers.get("Authorization", "")
+            if not header.startswith("Bearer "):
+                return JSONResponse(status_code=401, content={"detail": "Missing token"})
+            token = header[len("Bearer "):]
+            try:
+                payload = auth.decode_token(token)
+            except jwt.ExpiredSignatureError:
+                return JSONResponse(status_code=401, content={"detail": "Token expired"})
+            except jwt.InvalidTokenError:
+                return JSONResponse(status_code=401, content={"detail": "Invalid token"})
+            if db.is_token_revoked(conn, payload.get("jti", "")):
+                return JSONResponse(status_code=401, content={"detail": "Token revoked"})
+            request.state.user_id = payload["user_id"]
+            request.state.username = payload["username"]
+            request.state.jti = payload.get("jti", "")
+
+        return await call_next(request)
+    finally:
+        app.state.pool.putconn(conn)
 
 
 # --- Helpers ---
@@ -88,8 +97,8 @@ def to_list(rows) -> list[dict]:
     return [to_dict(r) for r in rows]
 
 
-def get_conn():
-    return app.state.conn
+def get_conn(request: Request):
+    return request.state.conn
 
 
 def get_user_id(request: Request) -> int:
@@ -173,8 +182,8 @@ def health():
 # --- Auth ---
 
 @app.post("/register")
-def register(body: RegisterBody):
-    conn = get_conn()
+def register(body: RegisterBody, request: Request):
+    conn = get_conn(request)
     if len(body.password) < 6:
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
     if not body.username.strip():
@@ -189,8 +198,8 @@ def register(body: RegisterBody):
 
 
 @app.post("/login")
-def login(body: LoginBody):
-    conn = get_conn()
+def login(body: LoginBody, request: Request):
+    conn = get_conn(request)
     user = db.get_user_by_username(conn, body.username.strip())
     if not user or not auth.verify_password(body.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid username or password")
@@ -200,7 +209,7 @@ def login(body: LoginBody):
 
 @app.post("/logout")
 def logout(request: Request):
-    conn = get_conn()
+    conn = get_conn(request)
     db.revoke_token(conn, request.state.jti)
     return {"ok": True}
 
@@ -214,7 +223,7 @@ def me(request: Request):
 
 @app.post("/notes")
 def create_note(body: CreateNoteBody, request: Request):
-    conn = get_conn()
+    conn = get_conn(request)
     uid = get_user_id(request)
     if body.source_id is not None:
         if db.get_source(conn, body.source_id, uid) is None:
@@ -230,13 +239,13 @@ def create_note(body: CreateNoteBody, request: Request):
 
 @app.post("/notes/sourceless-check")
 def get_sourceless_notes(body: NoteIdsBody, request: Request):
-    conn = get_conn()
+    conn = get_conn(request)
     return db.get_sourceless_notes(conn, body.note_ids, get_user_id(request))
 
 
 @app.post("/notes/bulk-source")
 def bulk_update_note_source(body: BulkSourceBody, request: Request):
-    conn = get_conn()
+    conn = get_conn(request)
     uid = get_user_id(request)
     if db.get_source(conn, body.source_id, uid) is None:
         raise HTTPException(status_code=404, detail="Source not found")
@@ -246,7 +255,7 @@ def bulk_update_note_source(body: BulkSourceBody, request: Request):
 
 @app.post("/notes/tags/batch")
 def get_tags_for_notes(body: NoteIdsBody, request: Request):
-    conn = get_conn()
+    conn = get_conn(request)
     result = db.get_tags_for_notes(conn, body.note_ids, get_user_id(request))
     return {str(k): to_list(v) for k, v in result.items()}
 
@@ -258,7 +267,7 @@ def get_notes(
     tag_id: int | None = Query(default=None),
     author_id: int | None = Query(default=None),
 ):
-    conn = get_conn()
+    conn = get_conn(request)
     uid = get_user_id(request)
     if source_id is not None:
         return to_list(db.get_notes_by_source(conn, source_id, uid))
@@ -271,7 +280,7 @@ def get_notes(
 
 @app.get("/notes/{note_id}")
 def get_note(note_id: int, request: Request):
-    conn = get_conn()
+    conn = get_conn(request)
     row = db.get_note(conn, note_id, get_user_id(request))
     if row is None:
         raise HTTPException(status_code=404, detail="Note not found")
@@ -280,7 +289,7 @@ def get_note(note_id: int, request: Request):
 
 @app.patch("/notes/{note_id}/source")
 def update_note_source(note_id: int, body: UpdateNoteSourceBody, request: Request):
-    conn = get_conn()
+    conn = get_conn(request)
     uid = get_user_id(request)
     if db.get_note(conn, note_id, uid) is None:
         raise HTTPException(status_code=404, detail="Note not found")
@@ -292,7 +301,7 @@ def update_note_source(note_id: int, body: UpdateNoteSourceBody, request: Reques
 
 @app.get("/notes/{note_id}/tags")
 def get_tags_for_note(note_id: int, request: Request):
-    conn = get_conn()
+    conn = get_conn(request)
     # Verify note belongs to user
     note = db.get_note(conn, note_id, get_user_id(request))
     if note is None:
@@ -302,7 +311,7 @@ def get_tags_for_note(note_id: int, request: Request):
 
 @app.post("/notes/{note_id}/tags")
 def add_tag_to_note(note_id: int, body: AddTagToNoteBody, request: Request):
-    conn = get_conn()
+    conn = get_conn(request)
     uid = get_user_id(request)
     if db.get_note(conn, note_id, uid) is None:
         raise HTTPException(status_code=404, detail="Note not found")
@@ -314,7 +323,7 @@ def add_tag_to_note(note_id: int, body: AddTagToNoteBody, request: Request):
 
 @app.delete("/notes/{note_id}")
 def delete_note(note_id: int, request: Request):
-    conn = get_conn()
+    conn = get_conn(request)
     uid = get_user_id(request)
     row = db.get_note(conn, note_id, uid)
     if row is None:
@@ -325,7 +334,7 @@ def delete_note(note_id: int, request: Request):
 
 @app.delete("/notes/{note_id}/tags/{tag_id}")
 def remove_tag_from_note(note_id: int, tag_id: int, request: Request):
-    conn = get_conn()
+    conn = get_conn(request)
     uid = get_user_id(request)
     if db.get_note(conn, note_id, uid) is None:
         raise HTTPException(status_code=404, detail="Note not found")
@@ -339,7 +348,7 @@ def remove_tag_from_note(note_id: int, tag_id: int, request: Request):
 
 @app.post("/sources")
 def create_source(body: CreateSourceBody, request: Request):
-    conn = get_conn()
+    conn = get_conn(request)
     uid = get_user_id(request)
     if body.publisher_id is not None:
         if db.get_publisher(conn, body.publisher_id, uid) is None:
@@ -360,13 +369,13 @@ def create_source(body: CreateSourceBody, request: Request):
 
 @app.get("/sources/recent")
 def get_recent_sources(request: Request):
-    conn = get_conn()
+    conn = get_conn(request)
     return to_list(db.get_recent_sources(conn, get_user_id(request)))
 
 
 @app.get("/sources/search")
 def search_sources(request: Request, q: str = Query(default="")):
-    conn = get_conn()
+    conn = get_conn(request)
     return to_list(db.search_sources(conn, q, get_user_id(request)))
 
 
@@ -376,7 +385,7 @@ def get_sources(
     author_last: str | None = Query(default=None),
     author_first: str | None = Query(default=None),
 ):
-    conn = get_conn()
+    conn = get_conn(request)
     uid = get_user_id(request)
     if author_last is not None and author_first is not None:
         return to_list(db.get_sources_by_author(conn, author_last, author_first, uid))
@@ -385,14 +394,14 @@ def get_sources(
 
 @app.get("/sources/{source_id}/citation")
 def get_citation(source_id: int, request: Request):
-    conn = get_conn()
+    conn = get_conn(request)
     citation = db.build_citation(conn, source_id, get_user_id(request))
     return {"citation": citation}
 
 
 @app.get("/sources/{source_id}/authors")
 def get_authors_for_source(source_id: int, request: Request):
-    conn = get_conn()
+    conn = get_conn(request)
     # Verify source belongs to user
     src = db.get_source(conn, source_id, get_user_id(request))
     if src is None:
@@ -402,7 +411,7 @@ def get_authors_for_source(source_id: int, request: Request):
 
 @app.post("/sources/{source_id}/authors")
 def add_author(source_id: int, body: AddAuthorBody, request: Request):
-    conn = get_conn()
+    conn = get_conn(request)
     uid = get_user_id(request)
     src = db.get_source(conn, source_id, uid)
     if src is None:
@@ -413,7 +422,7 @@ def add_author(source_id: int, body: AddAuthorBody, request: Request):
 
 @app.get("/sources/{source_id}")
 def get_source(source_id: int, request: Request):
-    conn = get_conn()
+    conn = get_conn(request)
     row = db.get_source(conn, source_id, get_user_id(request))
     if row is None:
         raise HTTPException(status_code=404, detail="Source not found")
@@ -424,13 +433,13 @@ def get_source(source_id: int, request: Request):
 
 @app.get("/source-types")
 def get_source_types(request: Request):
-    conn = get_conn()
+    conn = get_conn(request)
     return to_list(db.get_source_types(conn))
 
 
 @app.post("/source-types")
 def create_source_type(body: CreateSourceTypeBody, request: Request):
-    conn = get_conn()
+    conn = get_conn(request)
     try:
         type_id = db.create_source_type(conn, body.name)
         return {"id": type_id}
@@ -441,7 +450,7 @@ def create_source_type(body: CreateSourceTypeBody, request: Request):
 
 @app.get("/source-types/{type_id}")
 def get_source_type(type_id: int, request: Request):
-    conn = get_conn()
+    conn = get_conn(request)
     row = db.get_source_type(conn, type_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Source type not found")
@@ -452,19 +461,19 @@ def get_source_type(type_id: int, request: Request):
 
 @app.get("/publishers/search")
 def search_publishers(request: Request, q: str = Query(default="")):
-    conn = get_conn()
+    conn = get_conn(request)
     return to_list(db.search_publishers(conn, q, get_user_id(request)))
 
 
 @app.get("/publishers/cities")
 def search_publisher_cities(request: Request, q: str = Query(default="")):
-    conn = get_conn()
+    conn = get_conn(request)
     return db.search_publisher_cities(conn, q, get_user_id(request))
 
 
 @app.post("/publishers/get-or-create")
 def get_or_create_publisher(body: GetOrCreatePublisherBody, request: Request):
-    conn = get_conn()
+    conn = get_conn(request)
     pub_id = db.get_or_create_publisher(conn, body.name, get_user_id(request), body.city)
     return {"id": pub_id}
 
@@ -473,31 +482,31 @@ def get_or_create_publisher(body: GetOrCreatePublisherBody, request: Request):
 
 @app.get("/authors")
 def get_all_authors(request: Request):
-    conn = get_conn()
+    conn = get_conn(request)
     return to_list(db.get_all_authors(conn, get_user_id(request)))
 
 
 @app.get("/authors/recent")
 def get_recent_authors(request: Request):
-    conn = get_conn()
+    conn = get_conn(request)
     return to_list(db.get_recent_authors(conn, get_user_id(request)))
 
 
 @app.get("/authors/search")
 def search_authors(request: Request, q: str = Query(default="")):
-    conn = get_conn()
+    conn = get_conn(request)
     return to_list(db.search_authors(conn, q, get_user_id(request)))
 
 
 @app.get("/authors/last-names")
 def search_author_last_names(request: Request, q: str = Query(default="")):
-    conn = get_conn()
+    conn = get_conn(request)
     return db.search_author_last_names(conn, q, get_user_id(request))
 
 
 @app.get("/authors/first-names")
 def search_author_first_names(request: Request, q: str = Query(default="")):
-    conn = get_conn()
+    conn = get_conn(request)
     return db.search_author_first_names(conn, q, get_user_id(request))
 
 
@@ -505,19 +514,19 @@ def search_author_first_names(request: Request, q: str = Query(default="")):
 
 @app.get("/tags/recent")
 def get_recent_tags(request: Request):
-    conn = get_conn()
+    conn = get_conn(request)
     return to_list(db.get_recent_tags(conn, get_user_id(request)))
 
 
 @app.get("/tags/search")
 def search_tags(request: Request, q: str = Query(default="")):
-    conn = get_conn()
+    conn = get_conn(request)
     return to_list(db.search_tags(conn, q, get_user_id(request)))
 
 
 @app.get("/tags/by-name")
 def get_tag_by_name(request: Request, name: str = Query()):
-    conn = get_conn()
+    conn = get_conn(request)
     row = db.get_tag_by_name(conn, name, get_user_id(request))
     if row is None:
         raise HTTPException(status_code=404, detail="Tag not found")
@@ -526,20 +535,20 @@ def get_tag_by_name(request: Request, name: str = Query()):
 
 @app.post("/tags/get-or-create")
 def get_or_create_tag(body: GetOrCreateTagBody, request: Request):
-    conn = get_conn()
+    conn = get_conn(request)
     tag_id = db.get_or_create_tag(conn, body.name, get_user_id(request))
     return {"id": tag_id}
 
 
 @app.get("/tags")
 def get_all_tags(request: Request):
-    conn = get_conn()
+    conn = get_conn(request)
     return to_list(db.get_all_tags(conn, get_user_id(request)))
 
 
 @app.get("/tags/{tag_id}")
 def get_tag(tag_id: int, request: Request):
-    conn = get_conn()
+    conn = get_conn(request)
     row = db.get_tag(conn, tag_id, get_user_id(request))
     if row is None:
         raise HTTPException(status_code=404, detail="Tag not found")

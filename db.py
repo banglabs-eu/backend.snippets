@@ -4,24 +4,26 @@ from pathlib import Path
 
 import psycopg2
 import psycopg2.extras
+from psycopg2.pool import ThreadedConnectionPool
 
 
-def get_connection(database_url: str):
-    conn = psycopg2.connect(database_url, cursor_factory=psycopg2.extras.RealDictCursor)
-    conn.autocommit = False
-    return conn
-
-
-def init_db(database_url: str):
-    """Initialize DB: connect and run schema."""
-    conn = get_connection(database_url)
-    schema_path = Path(__file__).parent / "schema.sql"
-    with open(schema_path, "r") as f:
-        sql = f.read()
-    cur = conn.cursor()
-    cur.execute(sql)
-    conn.commit()
-    return conn
+def init_db(database_url: str, minconn: int = 2, maxconn: int = 10):
+    """Initialize DB: create connection pool and run schema."""
+    pool = ThreadedConnectionPool(
+        minconn, maxconn, database_url,
+        cursor_factory=psycopg2.extras.RealDictCursor,
+    )
+    conn = pool.getconn()
+    try:
+        schema_path = Path(__file__).parent / "schema.sql"
+        with open(schema_path, "r") as f:
+            sql = f.read()
+        cur = conn.cursor()
+        cur.execute(sql)
+        conn.commit()
+    finally:
+        pool.putconn(conn)
+    return pool
 
 
 # --- Users ---

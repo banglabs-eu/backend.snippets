@@ -30,7 +30,7 @@ No test suite exists yet. No linter is configured.
 Three-file backend with no ORM:
 
 - **main.py** — FastAPI app: all routes, Pydantic request models, JWT middleware, lifespan (DB init/teardown). Routes call `db.*` functions and convert results via `to_dict`/`to_list` helpers that serialize datetimes.
-- **db.py** — Data access layer: every function takes a `conn` (psycopg2 connection with `RealDictCursor`) as its first arg, runs raw SQL, and returns dicts. Most queries filter by `user_id` for multi-tenancy. `init_db()` runs `schema.sql` on startup.
+- **db.py** — Data access layer: every function takes a `conn` (psycopg2 connection with `RealDictCursor`) as its first arg, runs raw SQL, and returns dicts. Most queries filter by `user_id` for multi-tenancy. `init_db()` creates a `ThreadedConnectionPool` and runs `schema.sql` on startup.
 - **auth.py** — JWT helpers (PyJWT + bcrypt). `JWT_SECRET` and `JWT_EXPIRY_HOURS` from env vars. Tokens carry `user_id`, `username`, and `jti` (UUID for token revocation).
 - **schema.sql** — DDL with `IF NOT EXISTS` for idempotent startup. Includes seed data for `source_types` and migration statements. Schema version tracked in `schema_version` table (currently v4).
 - **Caddyfile** — Caddy reverse proxy config for automatic HTTPS in production.
@@ -41,7 +41,7 @@ Three-file backend with no ORM:
 - **CORS**: Configured with `allow_credentials=True` for browser-based React frontend. Origins set via `ALLOWED_ORIGINS` env var (defaults to `localhost:5173,localhost:3000` for dev).
 - **HTTPS**: Production uses Caddy as a reverse proxy (in `docker-compose.yml`). Caddy auto-provisions TLS certs via Let's Encrypt. Port 8000 is bound to `127.0.0.1` so only Caddy can reach the backend.
 - **Multi-tenancy**: Most tables have a `user_id` column. Almost every `db.*` function filters by `user_id`. Exception: `source_types` are shared across all users.
-- **Connection handling**: Single psycopg2 connection stored on `app.state.conn`, created in lifespan. `autocommit = False` — each `db.*` function calls `conn.commit()` after writes.
+- **Connection pooling**: `ThreadedConnectionPool` stored on `app.state.pool` (min/max size via `DB_POOL_MIN`/`DB_POOL_MAX` env vars, defaults 2/10). The request middleware checks out a connection per request (`request.state.conn`) and returns it after the response. Each `db.*` function calls `conn.commit()` after writes. Uvicorn runs 4 workers (each with its own pool).
 - **Env file selection**: `main.py` loads `.env.{APP_ENV}` (defaults to `.env.dev`). Docker compose sets this via the `ENV` variable.
 - **Schema migrations**: Done inline in `schema.sql` with idempotent ALTER TABLE statements. Bump `schema_version` when adding migrations. Current version: 4.
 
