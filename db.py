@@ -24,161 +24,200 @@ def init_db(database_url: str):
     return conn
 
 
+# --- Users ---
+
+def create_user(conn, username: str, password_hash: str) -> dict:
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO users (username, password_hash) VALUES (%s, %s) RETURNING id, username, created_at",
+        (username, password_hash),
+    )
+    row = cur.fetchone()
+    conn.commit()
+    return row
+
+
+def get_user_by_username(conn, username: str) -> dict | None:
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users WHERE username = %s", (username,))
+    return cur.fetchone()
+
+
+# --- Token Revocation ---
+
+def revoke_token(conn, jti: str):
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO revoked_tokens (jti) VALUES (%s) ON CONFLICT DO NOTHING",
+        (jti,),
+    )
+    conn.commit()
+
+
+def is_token_revoked(conn, jti: str) -> bool:
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM revoked_tokens WHERE jti = %s", (jti,))
+    return cur.fetchone() is not None
+
+
 # --- Notes ---
 
-def create_note(conn, body: str, source_id: int | None = None,
+def create_note(conn, body: str, user_id: int, source_id: int | None = None,
                 locator_type: str | None = None, locator_value: str | None = None) -> int:
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO notes (body, source_id, locator_type, locator_value) VALUES (%s, %s, %s, %s) RETURNING id",
-        (body, source_id, locator_type, locator_value),
+        "INSERT INTO notes (body, source_id, locator_type, locator_value, user_id) VALUES (%s, %s, %s, %s, %s) RETURNING id",
+        (body, source_id, locator_type, locator_value, user_id),
     )
     row = cur.fetchone()
     conn.commit()
     return row["id"]
 
 
-def update_note_source(conn, note_id: int, source_id: int):
+def update_note_source(conn, note_id: int, source_id: int, user_id: int):
     cur = conn.cursor()
-    cur.execute("UPDATE notes SET source_id = %s WHERE id = %s", (source_id, note_id))
+    cur.execute("UPDATE notes SET source_id = %s WHERE id = %s AND user_id = %s", (source_id, note_id, user_id))
     conn.commit()
 
 
-def get_note(conn, note_id: int) -> dict | None:
+def get_note(conn, note_id: int, user_id: int) -> dict | None:
     cur = conn.cursor()
-    cur.execute("SELECT * FROM notes WHERE id = %s", (note_id,))
+    cur.execute("SELECT * FROM notes WHERE id = %s AND user_id = %s", (note_id, user_id))
     return cur.fetchone()
 
 
-def get_all_notes(conn) -> list[dict]:
+def get_all_notes(conn, user_id: int) -> list[dict]:
     cur = conn.cursor()
-    cur.execute("SELECT * FROM notes ORDER BY created_at ASC")
+    cur.execute("SELECT * FROM notes WHERE user_id = %s ORDER BY created_at ASC", (user_id,))
     return cur.fetchall()
 
 
-def get_notes_by_source(conn, source_id: int) -> list[dict]:
+def get_notes_by_source(conn, source_id: int, user_id: int) -> list[dict]:
     cur = conn.cursor()
     cur.execute(
-        "SELECT * FROM notes WHERE source_id = %s ORDER BY created_at ASC", (source_id,)
+        "SELECT * FROM notes WHERE source_id = %s AND user_id = %s ORDER BY created_at ASC",
+        (source_id, user_id),
     )
     return cur.fetchall()
 
 
-def get_notes_by_tag(conn, tag_id: int) -> list[dict]:
+def get_notes_by_tag(conn, tag_id: int, user_id: int) -> list[dict]:
     cur = conn.cursor()
     cur.execute(
         """SELECT n.* FROM notes n
            JOIN note_tags nt ON n.id = nt.note_id
-           WHERE nt.tag_id = %s
+           WHERE nt.tag_id = %s AND n.user_id = %s
            ORDER BY n.created_at ASC""",
-        (tag_id,),
+        (tag_id, user_id),
     )
     return cur.fetchall()
 
 
-def get_notes_by_author(conn, author_id: int) -> list[dict]:
+def get_notes_by_author(conn, author_id: int, user_id: int) -> list[dict]:
     cur = conn.cursor()
     cur.execute(
         """SELECT DISTINCT n.* FROM notes n
            JOIN sources s ON n.source_id = s.id
            JOIN source_authors sa ON sa.source_id = s.id
-           WHERE sa.id = %s
+           WHERE sa.id = %s AND n.user_id = %s
            ORDER BY n.created_at ASC""",
-        (author_id,),
+        (author_id, user_id),
     )
     return cur.fetchall()
 
 
-def get_sourceless_notes(conn, note_ids: list[int]) -> list[int]:
+def get_sourceless_notes(conn, note_ids: list[int], user_id: int) -> list[int]:
     if not note_ids:
         return []
     placeholders = ",".join("%s" for _ in note_ids)
     cur = conn.cursor()
     cur.execute(
-        f"SELECT id FROM notes WHERE id IN ({placeholders}) AND source_id IS NULL",
-        note_ids,
+        f"SELECT id FROM notes WHERE id IN ({placeholders}) AND source_id IS NULL AND user_id = %s",
+        note_ids + [user_id],
     )
     rows = cur.fetchall()
     return [r["id"] for r in rows]
 
 
-def bulk_update_note_source(conn, note_ids: list[int], source_id: int):
+def bulk_update_note_source(conn, note_ids: list[int], source_id: int, user_id: int):
     if not note_ids:
         return
     placeholders = ",".join("%s" for _ in note_ids)
     cur = conn.cursor()
     cur.execute(
-        f"UPDATE notes SET source_id = %s WHERE id IN ({placeholders})",
-        [source_id] + note_ids,
+        f"UPDATE notes SET source_id = %s WHERE id IN ({placeholders}) AND user_id = %s",
+        [source_id] + note_ids + [user_id],
     )
     conn.commit()
 
 
 # --- Sources ---
 
-def create_source(conn, name: str, source_type_id: int | None = None,
+def create_source(conn, name: str, user_id: int, source_type_id: int | None = None,
                   year: str | None = None, url: str | None = None,
                   accessed_date: str | None = None, edition: str | None = None,
                   pages: str | None = None, extra_notes: str | None = None,
                   publisher_id: int | None = None) -> int:
     cur = conn.cursor()
     cur.execute(
-        """INSERT INTO sources (name, source_type_id, year, url, accessed_date, edition, pages, extra_notes, publisher_id)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
-        (name, source_type_id, year, url, accessed_date, edition, pages, extra_notes, publisher_id),
+        """INSERT INTO sources (name, source_type_id, year, url, accessed_date, edition, pages, extra_notes, publisher_id, user_id)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+        (name, source_type_id, year, url, accessed_date, edition, pages, extra_notes, publisher_id, user_id),
     )
     row = cur.fetchone()
     conn.commit()
     return row["id"]
 
 
-def get_source(conn, source_id: int) -> dict | None:
+def get_source(conn, source_id: int, user_id: int) -> dict | None:
     cur = conn.cursor()
-    cur.execute("SELECT * FROM sources WHERE id = %s", (source_id,))
+    cur.execute("SELECT * FROM sources WHERE id = %s AND user_id = %s", (source_id, user_id))
     return cur.fetchone()
 
 
-def search_sources(conn, prefix: str, limit: int = 20) -> list[dict]:
+def search_sources(conn, prefix: str, user_id: int, limit: int = 20) -> list[dict]:
     cur = conn.cursor()
     cur.execute(
-        "SELECT * FROM sources WHERE name ILIKE %s ORDER BY name LIMIT %s",
-        (f"{prefix}%", limit),
+        "SELECT * FROM sources WHERE name ILIKE %s AND user_id = %s ORDER BY name LIMIT %s",
+        (f"{prefix}%", user_id, limit),
     )
     return cur.fetchall()
 
 
-def get_recent_sources(conn, limit: int = 10) -> list[dict]:
+def get_recent_sources(conn, user_id: int, limit: int = 10) -> list[dict]:
     cur = conn.cursor()
     cur.execute(
         """SELECT s.* FROM sources s
            LEFT JOIN notes n ON n.source_id = s.id
+           WHERE s.user_id = %s
            GROUP BY s.id
            ORDER BY MAX(COALESCE(n.created_at, s.created_at)) DESC
            LIMIT %s""",
-        (limit,),
+        (user_id, limit),
     )
     return cur.fetchall()
 
 
-def get_all_sources(conn) -> list[dict]:
+def get_all_sources(conn, user_id: int) -> list[dict]:
     cur = conn.cursor()
-    cur.execute("SELECT * FROM sources ORDER BY name")
+    cur.execute("SELECT * FROM sources WHERE user_id = %s ORDER BY name", (user_id,))
     return cur.fetchall()
 
 
-def get_sources_by_author(conn, author_last: str, author_first: str) -> list[dict]:
+def get_sources_by_author(conn, author_last: str, author_first: str, user_id: int) -> list[dict]:
     cur = conn.cursor()
     cur.execute(
         """SELECT DISTINCT s.* FROM sources s
            JOIN source_authors sa ON sa.source_id = s.id
            WHERE LOWER(sa.last_name) = LOWER(%s) AND LOWER(sa.first_name) = LOWER(%s)
+             AND s.user_id = %s
            ORDER BY s.name""",
-        (author_last, author_first),
+        (author_last, author_first, user_id),
     )
     return cur.fetchall()
 
 
-# --- Source Types ---
+# --- Source Types (shared, no user_id) ---
 
 def get_source_types(conn) -> list[dict]:
     cur = conn.cursor()
@@ -202,63 +241,81 @@ def create_source_type(conn, name: str) -> int:
 
 # --- Publishers ---
 
-def find_publisher(conn, name: str) -> dict | None:
+def find_publisher(conn, name: str, user_id: int) -> dict | None:
     cur = conn.cursor()
-    cur.execute("SELECT * FROM source_publishers WHERE LOWER(name) = LOWER(%s)", (name,))
+    cur.execute(
+        "SELECT * FROM source_publishers WHERE LOWER(name) = LOWER(%s) AND user_id = %s",
+        (name, user_id),
+    )
     return cur.fetchone()
 
 
-def create_publisher(conn, name: str, city: str | None = None) -> int:
+def get_publisher(conn, publisher_id: int, user_id: int) -> dict | None:
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM source_publishers WHERE id = %s AND user_id = %s", (publisher_id, user_id))
+    return cur.fetchone()
+
+
+def create_publisher(conn, name: str, user_id: int, city: str | None = None) -> int:
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO source_publishers (name, city) VALUES (%s, %s) RETURNING id", (name, city)
+        "INSERT INTO source_publishers (name, city, user_id) VALUES (%s, %s, %s) RETURNING id",
+        (name, city, user_id),
     )
     row = cur.fetchone()
     conn.commit()
     return row["id"]
 
 
-def get_or_create_publisher(conn, name: str, city: str | None = None) -> int:
-    existing = find_publisher(conn, name)
+def get_or_create_publisher(conn, name: str, user_id: int, city: str | None = None) -> int:
+    existing = find_publisher(conn, name, user_id)
     if existing:
         return existing["id"]
-    return create_publisher(conn, name, city)
+    return create_publisher(conn, name, user_id, city)
 
 
-def search_publishers(conn, prefix: str, limit: int = 20) -> list[dict]:
+def search_publishers(conn, prefix: str, user_id: int, limit: int = 20) -> list[dict]:
     cur = conn.cursor()
     cur.execute(
-        "SELECT * FROM source_publishers WHERE name ILIKE %s ORDER BY name LIMIT %s",
-        (f"{prefix}%", limit),
+        "SELECT * FROM source_publishers WHERE name ILIKE %s AND user_id = %s ORDER BY name LIMIT %s",
+        (f"{prefix}%", user_id, limit),
     )
     return cur.fetchall()
 
 
-def search_publisher_cities(conn, prefix: str, limit: int = 20) -> list[str]:
+def search_publisher_cities(conn, prefix: str, user_id: int, limit: int = 20) -> list[str]:
     cur = conn.cursor()
     cur.execute(
-        "SELECT DISTINCT city FROM source_publishers WHERE city IS NOT NULL AND city ILIKE %s ORDER BY city LIMIT %s",
-        (f"{prefix}%", limit),
+        """SELECT DISTINCT city FROM source_publishers
+           WHERE city IS NOT NULL AND city ILIKE %s AND user_id = %s
+           ORDER BY city LIMIT %s""",
+        (f"{prefix}%", user_id, limit),
     )
     rows = cur.fetchall()
     return [r["city"] for r in rows]
 
 
-def search_author_last_names(conn, prefix: str, limit: int = 20) -> list[str]:
+def search_author_last_names(conn, prefix: str, user_id: int, limit: int = 20) -> list[str]:
     cur = conn.cursor()
     cur.execute(
-        "SELECT DISTINCT last_name FROM source_authors WHERE last_name ILIKE %s ORDER BY last_name LIMIT %s",
-        (f"{prefix}%", limit),
+        """SELECT DISTINCT sa.last_name FROM source_authors sa
+           JOIN sources s ON sa.source_id = s.id
+           WHERE sa.last_name ILIKE %s AND s.user_id = %s
+           ORDER BY sa.last_name LIMIT %s""",
+        (f"{prefix}%", user_id, limit),
     )
     rows = cur.fetchall()
     return [r["last_name"] for r in rows]
 
 
-def search_author_first_names(conn, prefix: str, limit: int = 20) -> list[str]:
+def search_author_first_names(conn, prefix: str, user_id: int, limit: int = 20) -> list[str]:
     cur = conn.cursor()
     cur.execute(
-        "SELECT DISTINCT first_name FROM source_authors WHERE first_name ILIKE %s ORDER BY first_name LIMIT %s",
-        (f"{prefix}%", limit),
+        """SELECT DISTINCT sa.first_name FROM source_authors sa
+           JOIN sources s ON sa.source_id = s.id
+           WHERE sa.first_name ILIKE %s AND s.user_id = %s
+           ORDER BY sa.first_name LIMIT %s""",
+        (f"{prefix}%", user_id, limit),
     )
     rows = cur.fetchall()
     return [r["first_name"] for r in rows]
@@ -287,89 +344,99 @@ def get_authors_for_source(conn, source_id: int) -> list[dict]:
     return cur.fetchall()
 
 
-def get_all_authors(conn) -> list[dict]:
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM source_authors ORDER BY last_name, first_name")
-    return cur.fetchall()
-
-
-def get_recent_authors(conn, limit: int = 10) -> list[dict]:
+def get_all_authors(conn, user_id: int) -> list[dict]:
     cur = conn.cursor()
     cur.execute(
         """SELECT sa.* FROM source_authors sa
            JOIN sources s ON sa.source_id = s.id
-           GROUP BY sa.id, sa.source_id, sa.first_name, sa.last_name, sa.author_order
-           ORDER BY MAX(s.created_at) DESC
-           LIMIT %s""",
-        (limit,),
+           WHERE s.user_id = %s
+           ORDER BY sa.last_name, sa.first_name""",
+        (user_id,),
     )
     return cur.fetchall()
 
 
-def search_authors(conn, prefix: str, limit: int = 20) -> list[dict]:
+def get_recent_authors(conn, user_id: int, limit: int = 10) -> list[dict]:
+    cur = conn.cursor()
+    cur.execute(
+        """SELECT sa.* FROM source_authors sa
+           JOIN sources s ON sa.source_id = s.id
+           WHERE s.user_id = %s
+           GROUP BY sa.id, sa.source_id, sa.first_name, sa.last_name, sa.author_order
+           ORDER BY MAX(s.created_at) DESC
+           LIMIT %s""",
+        (user_id, limit),
+    )
+    return cur.fetchall()
+
+
+def search_authors(conn, prefix: str, user_id: int, limit: int = 20) -> list[dict]:
     p = f"{prefix}%"
     cur = conn.cursor()
     cur.execute(
-        """SELECT * FROM source_authors
-           WHERE last_name ILIKE %s OR first_name ILIKE %s
-           ORDER BY last_name, first_name LIMIT %s""",
-        (p, p, limit),
+        """SELECT sa.* FROM source_authors sa
+           JOIN sources s ON sa.source_id = s.id
+           WHERE (sa.last_name ILIKE %s OR sa.first_name ILIKE %s)
+             AND s.user_id = %s
+           ORDER BY sa.last_name, sa.first_name LIMIT %s""",
+        (p, p, user_id, limit),
     )
     return cur.fetchall()
 
 
 # --- Tags ---
 
-def get_or_create_tag(conn, name: str) -> int:
+def get_or_create_tag(conn, name: str, user_id: int) -> int:
     name = name.strip().lower()
     cur = conn.cursor()
-    cur.execute("SELECT id FROM tags WHERE name = %s", (name,))
+    cur.execute("SELECT id FROM tags WHERE name = %s AND user_id = %s", (name, user_id))
     row = cur.fetchone()
     if row:
         return row["id"]
-    cur.execute("INSERT INTO tags (name) VALUES (%s) RETURNING id", (name,))
+    cur.execute("INSERT INTO tags (name, user_id) VALUES (%s, %s) RETURNING id", (name, user_id))
     row = cur.fetchone()
     conn.commit()
     return row["id"]
 
 
-def get_tag(conn, tag_id: int) -> dict | None:
+def get_tag(conn, tag_id: int, user_id: int) -> dict | None:
     cur = conn.cursor()
-    cur.execute("SELECT * FROM tags WHERE id = %s", (tag_id,))
+    cur.execute("SELECT * FROM tags WHERE id = %s AND user_id = %s", (tag_id, user_id))
     return cur.fetchone()
 
 
-def get_tag_by_name(conn, name: str) -> dict | None:
+def get_tag_by_name(conn, name: str, user_id: int) -> dict | None:
     cur = conn.cursor()
-    cur.execute("SELECT * FROM tags WHERE name = %s", (name.strip().lower(),))
+    cur.execute("SELECT * FROM tags WHERE name = %s AND user_id = %s", (name.strip().lower(), user_id))
     return cur.fetchone()
 
 
-def search_tags(conn, prefix: str, limit: int = 20) -> list[dict]:
+def search_tags(conn, prefix: str, user_id: int, limit: int = 20) -> list[dict]:
     cur = conn.cursor()
     cur.execute(
-        "SELECT * FROM tags WHERE name ILIKE %s ORDER BY name LIMIT %s",
-        (f"{prefix.lower()}%", limit),
+        "SELECT * FROM tags WHERE name ILIKE %s AND user_id = %s ORDER BY name LIMIT %s",
+        (f"{prefix.lower()}%", user_id, limit),
     )
     return cur.fetchall()
 
 
-def get_all_tags(conn) -> list[dict]:
+def get_all_tags(conn, user_id: int) -> list[dict]:
     cur = conn.cursor()
-    cur.execute("SELECT * FROM tags ORDER BY name")
+    cur.execute("SELECT * FROM tags WHERE user_id = %s ORDER BY name", (user_id,))
     return cur.fetchall()
 
 
-def get_recent_tags(conn, limit: int = 10) -> list[dict]:
+def get_recent_tags(conn, user_id: int, limit: int = 10) -> list[dict]:
     cur = conn.cursor()
     cur.execute(
         """SELECT t.* FROM tags t
            JOIN note_tags nt ON t.id = nt.tag_id
            JOIN notes n ON n.id = nt.note_id
-           GROUP BY t.id, t.name
+           WHERE n.user_id = %s
+           GROUP BY t.id, t.name, t.user_id
            ORDER BY MAX(n.created_at) DESC
            LIMIT %s""",
-        (limit,),
+        (user_id, limit),
     )
     return cur.fetchall()
 
@@ -392,10 +459,10 @@ def remove_tag_from_note(conn, note_id: int, tag_id: int):
     conn.commit()
 
 
-def delete_note(conn, note_id: int):
+def delete_note(conn, note_id: int, user_id: int):
     cur = conn.cursor()
     cur.execute("DELETE FROM note_tags WHERE note_id = %s", (note_id,))
-    cur.execute("DELETE FROM notes WHERE id = %s", (note_id,))
+    cur.execute("DELETE FROM notes WHERE id = %s AND user_id = %s", (note_id, user_id))
     conn.commit()
 
 
@@ -411,7 +478,7 @@ def get_tags_for_note(conn, note_id: int) -> list[dict]:
     return cur.fetchall()
 
 
-def get_tags_for_notes(conn, note_ids: list[int]) -> dict[int, list[dict]]:
+def get_tags_for_notes(conn, note_ids: list[int], user_id: int) -> dict[int, list[dict]]:
     """Return {note_id: [tag_rows]} for a batch of note ids."""
     if not note_ids:
         return {}
@@ -420,9 +487,10 @@ def get_tags_for_notes(conn, note_ids: list[int]) -> dict[int, list[dict]]:
     cur.execute(
         f"""SELECT nt.note_id, t.* FROM tags t
             JOIN note_tags nt ON t.id = nt.tag_id
-            WHERE nt.note_id IN ({placeholders})
+            JOIN notes n ON n.id = nt.note_id
+            WHERE nt.note_id IN ({placeholders}) AND n.user_id = %s
             ORDER BY t.name""",
-        note_ids,
+        note_ids + [user_id],
     )
     rows = cur.fetchall()
     result: dict[int, list] = {nid: [] for nid in note_ids}
@@ -433,9 +501,9 @@ def get_tags_for_notes(conn, note_ids: list[int]) -> dict[int, list[dict]]:
 
 # --- Citation ---
 
-def build_citation(conn, source_id: int) -> str:
+def build_citation(conn, source_id: int, user_id: int) -> str:
     """Build an MLA-ish citation string for a source."""
-    src = get_source(conn, source_id)
+    src = get_source(conn, source_id, user_id)
     if not src:
         return ""
     parts = []
@@ -467,9 +535,7 @@ def build_citation(conn, source_id: int) -> str:
         parts.append(f'{src["edition"]} ed.')
 
     if src["publisher_id"]:
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM source_publishers WHERE id = %s", (src["publisher_id"],))
-        pub = cur.fetchone()
+        pub = get_publisher(conn, src["publisher_id"], user_id)
         if pub:
             pub_str = pub["name"]
             if pub["city"]:

@@ -1,7 +1,7 @@
 # Environment variables - never commit real credentials
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
 
 # Python
 __pycache__/
