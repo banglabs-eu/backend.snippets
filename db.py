@@ -54,6 +54,32 @@ def get_user_by_id(conn, user_id: int) -> dict | None:
     return cur.fetchone()
 
 
+def get_user_by_google_id(conn, google_id: str) -> dict | None:
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users WHERE google_id = %s", (google_id,))
+    return cur.fetchone()
+
+
+def create_google_user(conn, username: str, google_id: str, email: str | None = None) -> dict:
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO users (username, password_hash, google_id, email) VALUES (%s, NULL, %s, %s) RETURNING id, username, created_at",
+        (username, google_id, email),
+    )
+    row = cur.fetchone()
+    conn.commit()
+    return row
+
+
+def link_google_account(conn, user_id: int, google_id: str, email: str | None = None):
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE users SET google_id = %s, email = COALESCE(%s, email) WHERE id = %s",
+        (google_id, email, user_id),
+    )
+    conn.commit()
+
+
 def delete_user(conn, user_id: int):
     cur = conn.cursor()
     cur.execute("DELETE FROM users WHERE id = %s", (user_id,))

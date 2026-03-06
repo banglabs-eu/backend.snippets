@@ -183,3 +183,16 @@ BEGIN
         INSERT INTO schema_version (version) VALUES (7);
     END IF;
 END $$;
+
+-- === Migration v8: Google OAuth support ===
+ALTER TABLE users ADD COLUMN IF NOT EXISTS google_id TEXT UNIQUE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;
+
+-- Make password_hash nullable for Google-only users
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_version WHERE version = 8) THEN
+        ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL;
+        INSERT INTO schema_version (version) VALUES (8);
+    END IF;
+END $$;

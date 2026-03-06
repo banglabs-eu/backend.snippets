@@ -8,6 +8,8 @@ import jwt
 import psycopg2.errors
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request
+from google.auth.transport import requests as google_requests
+from google.oauth2 import id_token as google_id_token
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -48,7 +50,9 @@ app.add_middleware(
 )
 
 
-_PUBLIC_PATHS = {"/health", "/register", "/login"}
+_GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
+
+_PUBLIC_PATHS = {"/health", "/register", "/login", "/auth/google"}
 
 
 @app.middleware("http")
@@ -116,6 +120,10 @@ class RegisterBody(BaseModel):
 class LoginBody(BaseModel):
     username: str
     password: str
+
+
+class GoogleAuthBody(BaseModel):
+    token: str
 
 
 class ChangePasswordBody(BaseModel):
@@ -223,10 +231,49 @@ def login(body: LoginBody, request: Request):
             detail=f"Too many failed attempts. Try again in {db.LOCKOUT_MINUTES} minutes.",
         )
     user = db.get_user_by_username(conn, username)
-    if not user or not auth.verify_password(body.password, user["password_hash"]):
+    if not user or not user["password_hash"] or not auth.verify_password(body.password, user["password_hash"]):
         db.record_failed_login(conn, username)
         raise HTTPException(status_code=401, detail="Invalid username or password")
     db.clear_failed_attempts(conn, username)
+    token = auth.create_token(user["id"], user["username"])
+    return {"token": token, "user_id": user["id"], "username": user["username"]}
+
+
+@app.post("/auth/google")
+def google_login(body: GoogleAuthBody, request: Request):
+    if not _GOOGLE_CLIENT_ID:
+        raise HTTPException(status_code=501, detail="Google OAuth not configured")
+    conn = get_conn(request)
+    try:
+        idinfo = google_id_token.verify_oauth2_token(
+            body.token, google_requests.Request(), _GOOGLE_CLIENT_ID
+        )
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Invalid Google token")
+    google_id = idinfo["sub"]
+    email = idinfo.get("email")
+    name = idinfo.get("name", "")
+    # Check if user already exists with this Google account
+    user = db.get_user_by_google_id(conn, google_id)
+    if user:
+        token = auth.create_token(user["id"], user["username"])
+        return {"token": token, "user_id": user["id"], "username": user["username"]}
+    # Check if a user with this email exists (link accounts)
+    if email:
+        existing = db.get_user_by_username(conn, email)
+        if existing:
+            db.link_google_account(conn, existing["id"], google_id, email)
+            token = auth.create_token(existing["id"], existing["username"])
+            return {"token": token, "user_id": existing["id"], "username": existing["username"]}
+    # Create new user — use email as username, fall back to Google name
+    username = email or name or f"google_{google_id[:8]}"
+    # Ensure username uniqueness
+    base_username = username
+    suffix = 1
+    while db.get_user_by_username(conn, username):
+        username = f"{base_username}_{suffix}"
+        suffix += 1
+    user = db.create_google_user(conn, username, google_id, email)
     token = auth.create_token(user["id"], user["username"])
     return {"token": token, "user_id": user["id"], "username": user["username"]}
 
@@ -250,6 +297,8 @@ def change_password(body: ChangePasswordBody, request: Request):
             detail=f"Too many failed attempts. Try again in {db.LOCKOUT_MINUTES} minutes.",
         )
     user = db.get_user_by_id(conn, uid)
+    if not user["password_hash"]:
+        raise HTTPException(status_code=400, detail="Account uses Google login. Set a password first.")
     if not auth.verify_password(body.current_password, user["password_hash"]):
         db.record_failed_login(conn, username)
         raise HTTPException(status_code=401, detail="Current password is incorrect")
