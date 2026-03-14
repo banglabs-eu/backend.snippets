@@ -1,5 +1,6 @@
 """JWT authentication helpers for Snippets backend."""
 
+import hashlib
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -33,3 +34,14 @@ def create_token(user_id: int, username: str) -> str:
 def decode_token(token: str) -> dict:
     """Validate and return payload. Raises jwt.ExpiredSignatureError or jwt.InvalidTokenError."""
     return jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+
+
+def hash_magic_token(raw_token: str) -> str:
+    """SHA-256 hash a magic link token for storage."""
+    return hashlib.sha256(raw_token.encode()).hexdigest()
+
+
+def generate_magic_token() -> str:
+    """Generate a cryptographically secure magic link token."""
+    import secrets
+    return secrets.token_urlsafe(32)

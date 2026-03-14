@@ -1,19 +1,31 @@
 """FastAPI backend for Snippets."""
 
+import asyncio
+import json
+import logging
 import os
+import smtplib
+import tempfile
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 
+import anthropic
+import genanki
 import jwt
 import psycopg2.errors
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
+from starlette.background import BackgroundTask
 
 import auth
 import db
+
+log = logging.getLogger(__name__)
 
 load_dotenv(f".env.{os.environ.get('APP_ENV', 'dev')}")
 
@@ -48,7 +60,7 @@ app.add_middleware(
 )
 
 
-_PUBLIC_PATHS = {"/health", "/register", "/login"}
+_PUBLIC_PATHS = {"/health", "/register", "/login", "/auth/magic-link", "/auth/verify-magic-link"}
 
 
 @app.middleware("http")
@@ -182,6 +194,87 @@ class GetOrCreateTagBody(BaseModel):
     name: str
 
 
+class MagicLinkBody(BaseModel):
+    email: str
+
+
+class VerifyMagicLinkBody(BaseModel):
+    token: str
+
+
+# --- Email sending ---
+
+_SMTP_HOST = os.environ.get("SMTP_HOST", "")
+_SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
+_SMTP_USER = os.environ.get("SMTP_USER", "")
+_SMTP_PASS = os.environ.get("SMTP_PASS", "")
+_SMTP_FROM = os.environ.get("SMTP_FROM", "noreply@snippets.eu")
+_MAGIC_LINK_BASE_URL = os.environ.get("MAGIC_LINK_BASE_URL", "https://web.snippets.eu")
+
+# Basic disposable email domain blocklist
+_DISPOSABLE_DOMAINS = {
+    "mailinator.com", "10minutemail.com", "guerrillamail.com", "tempmail.com",
+    "throwaway.email", "yopmail.com", "trashmail.com", "sharklasers.com",
+    "guerrillamail.info", "grr.la", "guerrillamail.biz", "guerrillamail.de",
+    "guerrillamail.net", "mailnesia.com", "maildrop.cc", "dispostable.com",
+    "temp-mail.org", "fakeinbox.com", "mailcatch.com", "tempail.com",
+}
+
+
+_ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+
+ANKI_MODEL = genanki.Model(
+    1607392319,
+    'Snippets Flashcard',
+    fields=[{'name': 'Question'}, {'name': 'Answer'}],
+    templates=[{
+        'name': 'Card 1',
+        'qfmt': '{{Question}}',
+        'afmt': '{{FrontSide}}<hr id="answer">{{Answer}}',
+    }],
+)
+
+
+def _is_disposable_email(email: str) -> bool:
+    domain = email.lower().strip().split("@")[-1]
+    return domain in _DISPOSABLE_DOMAINS
+
+
+def _send_magic_link_email(email: str, raw_token: str):
+    """Send magic link email via SMTP. Falls back to logging if SMTP is not configured."""
+    link = f"{_MAGIC_LINK_BASE_URL}/?magic_token={raw_token}"
+
+    if not _SMTP_HOST:
+        log.warning("SMTP not configured — magic link for %s: %s", email, link)
+        return
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = "Sign in to Snippets"
+    msg["From"] = _SMTP_FROM
+    msg["To"] = email
+
+    text = f"Sign in to Snippets by clicking this link:\n\n{link}\n\nThis link expires in 10 minutes. If you didn't request this, ignore this email."
+    html = f"""\
+<html><body style="font-family: Inter, system-ui, sans-serif; color: #e2e8f0; background: #0a0e17; padding: 32px;">
+<div style="max-width: 480px; margin: 0 auto;">
+<h2 style="color: #fff; font-family: 'Playfair Display', serif;">Sign in to Snippets</h2>
+<p>Click the button below to sign in:</p>
+<p style="text-align: center; margin: 24px 0;">
+  <a href="{link}" style="background: #6366f1; color: #fff; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: 600;">Sign in</a>
+</p>
+<p style="font-size: 13px; color: #94a3b8;">This link expires in 10 minutes. If you didn't request this, ignore this email.</p>
+</div>
+</body></html>"""
+
+    msg.attach(MIMEText(text, "plain"))
+    msg.attach(MIMEText(html, "html"))
+
+    with smtplib.SMTP(_SMTP_HOST, _SMTP_PORT) as server:
+        server.starttls()
+        server.login(_SMTP_USER, _SMTP_PASS)
+        server.send_message(msg)
+
+
 # --- Health ---
 
 @app.get("/health")
@@ -229,6 +322,62 @@ def login(body: LoginBody, request: Request):
     db.clear_failed_attempts(conn, username)
     token = auth.create_token(user["id"], user["username"])
     return {"token": token, "user_id": user["id"], "username": user["username"]}
+
+
+@app.post("/auth/magic-link")
+def request_magic_link(body: MagicLinkBody, request: Request):
+    conn = get_conn(request)
+    email = body.email.lower().strip()
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="Valid email required")
+    if _is_disposable_email(email):
+        raise HTTPException(status_code=400, detail="Disposable email addresses are not allowed")
+
+    # Rate limit per email
+    recent = db.count_recent_magic_links_for_email(conn, email)
+    if recent >= db.MAGIC_LINK_RATE_PER_EMAIL:
+        raise HTTPException(status_code=429, detail="Too many requests. Try again later.")
+
+    # Generate token, hash it, store it
+    raw_token = auth.generate_magic_token()
+    token_hash = auth.hash_magic_token(raw_token)
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=db.MAGIC_LINK_EXPIRY_MINUTES)
+    db.create_magic_link_token(conn, token_hash, email, expires_at)
+
+    # Send email (or log if SMTP not configured)
+    try:
+        _send_magic_link_email(email, raw_token)
+    except Exception:
+        log.exception("Failed to send magic link email to %s", email)
+        raise HTTPException(status_code=500, detail="Failed to send email. Try again later.")
+
+    # Always return ok (don't reveal whether email exists)
+    return {"ok": True}
+
+
+@app.post("/auth/verify-magic-link")
+def verify_magic_link(body: VerifyMagicLinkBody, request: Request):
+    conn = get_conn(request)
+    token_hash = auth.hash_magic_token(body.token)
+    row = db.get_magic_link_token(conn, token_hash)
+    if not row:
+        raise HTTPException(status_code=401, detail="Invalid or expired link")
+
+    # Mark token as used immediately (single-use)
+    db.mark_magic_link_used(conn, row["id"])
+
+    email = row["email"]
+
+    # Find or create user by email
+    user = db.get_user_by_email(conn, email)
+    if user is None:
+        # Deferred account creation — account only created after clicking the link
+        user = db.create_user_from_email(conn, email)
+    elif not user.get("email_verified"):
+        db.set_user_email(conn, user["id"], email)
+
+    token = auth.create_token(user["id"], user["username"])
+    return {"token": token, "user_id": user["id"], "email": email}
 
 
 @app.post("/logout")
@@ -428,6 +577,87 @@ def remove_tag_from_note(note_id: int, tag_id: int, request: Request):
         raise HTTPException(status_code=404, detail="Tag not found")
     db.remove_tag_from_note(conn, note_id, tag_id)
     return {"ok": True}
+
+
+# --- Anki Export ---
+
+async def _generate_flashcard(client, note_body: str, tags: str, source: str) -> tuple[str, str] | None:
+    prompt = (
+        "You are a flashcard generator. Convert the following knowledge snippet into a single Anki flashcard.\n"
+        'Return ONLY valid JSON with two fields: "q" (question) and "a" (answer).\n'
+        "The question should test recall of the key fact. The answer should be concise.\n"
+        "If there are tags, use them as context clues for what domain this fact belongs to.\n\n"
+        f"Tags: {tags}\n"
+        f"Source: {source}\n\n"
+        f"Snippet:\n{note_body}"
+    )
+    try:
+        response = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=300,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = response.content[0].text
+        data = json.loads(text)
+        return (data["q"], data["a"])
+    except Exception:
+        log.warning("Failed to generate flashcard for note", exc_info=True)
+        return None
+
+
+@app.post("/notes/export/anki")
+async def export_anki(body: NoteIdsBody, request: Request):
+    if not _ANTHROPIC_API_KEY:
+        raise HTTPException(status_code=500, detail="Anthropic API key not configured")
+
+    conn = get_conn(request)
+    uid = get_user_id(request)
+
+    notes = db.get_notes_by_ids(conn, body.note_ids, uid)
+    if not notes:
+        raise HTTPException(status_code=404, detail="No notes found")
+
+    note_ids = [n["id"] for n in notes]
+    tags_map = db.get_tags_for_notes(conn, note_ids, uid)
+
+    source_cache: dict[int, str] = {}
+    for note in notes:
+        sid = note.get("source_id")
+        if sid and sid not in source_cache:
+            src = db.get_source(conn, sid, uid)
+            source_cache[sid] = src["name"] if src else "unknown"
+
+    client = anthropic.AsyncAnthropic(api_key=_ANTHROPIC_API_KEY)
+
+    async def gen(note):
+        note_tags = tags_map.get(note["id"], [])
+        tag_str = ", ".join(t["name"] for t in note_tags) if note_tags else "none"
+        source_str = source_cache.get(note.get("source_id"), "unknown")
+        return await _generate_flashcard(client, note["body"], tag_str, source_str)
+
+    flashcards: list[tuple[str, str]] = []
+    for i in range(0, len(notes), 10):
+        batch = notes[i : i + 10]
+        results = await asyncio.gather(*(gen(n) for n in batch))
+        flashcards.extend(r for r in results if r is not None)
+
+    if not flashcards:
+        raise HTTPException(status_code=400, detail="No flashcards could be generated")
+
+    deck = genanki.Deck(2059400110, 'Snippets Export')
+    for q, a in flashcards:
+        deck.add_note(genanki.Note(model=ANKI_MODEL, fields=[q, a]))
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".apkg", delete=False)
+    tmp.close()
+    genanki.Package(deck).write_to_file(tmp.name)
+
+    return FileResponse(
+        tmp.name,
+        media_type="application/octet-stream",
+        filename="snippets.apkg",
+        background=BackgroundTask(os.unlink, tmp.name),
+    )
 
 
 # --- Sources ---

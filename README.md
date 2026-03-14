@@ -63,7 +63,11 @@ The app uses JWT-based multi-user authentication. Register a user, then include 
 Authorization: Bearer <jwt-token>
 ```
 
-All endpoints except `/health`, `/register`, and `/login` require a valid JWT.
+All endpoints except `/health`, `/register`, `/login`, `/auth/magic-link`, and `/auth/verify-magic-link` require a valid JWT.
+
+### Magic link authentication
+
+Users can also sign in without a password via email magic links. Send a POST to `/auth/magic-link` with `{email}`. If SMTP is configured, an email with a one-time link is sent; otherwise the link is logged. The link is verified via `/auth/verify-magic-link`, which returns a JWT. Accounts are created automatically on first use.
 
 ## API
 
@@ -79,9 +83,12 @@ All endpoints return JSON. Dates are ISO 8601 strings.
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| POST | `/register` | No | Create account `{username, password}` — returns JWT |
+| POST | `/register` | No | Create account `{username, password, invite_code}` — returns JWT |
 | POST | `/login` | No | Login `{username, password}` — returns JWT |
+| POST | `/auth/magic-link` | No | Request magic link email `{email}` |
+| POST | `/auth/verify-magic-link` | No | Verify magic link token `{token}` — returns JWT |
 | POST | `/logout` | Yes | Revoke the current token |
+| POST | `/change-password` | Yes | Change password `{current_password, new_password}` |
 | GET | `/me` | Yes | Returns `{user_id, username}` for the current token |
 
 ### Notes
@@ -99,6 +106,7 @@ All endpoints return JSON. Dates are ISO 8601 strings.
 | POST | `/notes/{id}/tags` | Add a tag to a note |
 | DELETE | `/notes/{id}/tags/{tag_id}` | Remove a tag from a note |
 | POST | `/notes/tags/batch` | Get tags for multiple notes: `{note_id: [tags]}` |
+| POST | `/notes/export/anki` | Export notes as Anki .apkg file `{note_ids: [int]}` |
 
 ### Sources
 
@@ -149,6 +157,28 @@ All endpoints return JSON. Dates are ISO 8601 strings.
 | GET | `/tags/by-name?name=` | Get tag by exact name |
 | POST | `/tags/get-or-create` | Get existing or create tag `{name}` |
 | GET | `/tags/{id}` | Get a tag |
+| DELETE | `/tags/{id}` | Delete a tag |
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DATABASE_URL` | `postgresql://localhost/snippets` | PostgreSQL connection string |
+| `JWT_SECRET` | `change-me-in-production` | Secret for signing JWTs |
+| `JWT_EXPIRY_HOURS` | `720` | Token lifetime (30 days) |
+| `ALLOWED_ORIGINS` | (empty) | Comma-separated CORS origins |
+| `DEBUG` | `false` | Enables `/docs` and `/redoc` when `true` |
+| `DB_POOL_MIN` | `2` | Min connections per worker pool |
+| `DB_POOL_MAX` | `10` | Max connections per worker pool |
+| `APP_ENV` | `dev` | Selects `.env.{APP_ENV}` file |
+| `INVITE_ADMIN` | `adam` | Username allowed to create/view invite codes |
+| `SMTP_HOST` | (empty) | SMTP host for magic link emails (logs links if empty) |
+| `SMTP_PORT` | `587` | SMTP port |
+| `SMTP_USER` | (empty) | SMTP username |
+| `SMTP_PASS` | (empty) | SMTP password |
+| `SMTP_FROM` | `noreply@snippets.eu` | Sender address for magic link emails |
+| `MAGIC_LINK_BASE_URL` | `https://web.snippets.eu` | Frontend URL for magic link redirect |
+| `ANTHROPIC_API_KEY` | (empty) | Anthropic API key for AI-powered Anki export |
 
 ## Files
 

@@ -183,3 +183,58 @@ BEGIN
         INSERT INTO schema_version (version) VALUES (7);
     END IF;
 END $$;
+
+-- === Migration v8: email on users, magic_link_tokens, auth_providers ===
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- Make password_hash nullable (magic-link-only users won't have one)
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_version WHERE version = 8) THEN
+        ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL;
+
+        -- Partial unique index: only one account per verified email
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_unique
+            ON users (email) WHERE email IS NOT NULL;
+
+        INSERT INTO schema_version (version) VALUES (8);
+    END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS magic_link_tokens (
+    id SERIAL PRIMARY KEY,
+    token_hash TEXT NOT NULL,
+    email TEXT NOT NULL,
+    expires_at TIMESTAMP NOT NULL,
+    used BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_magic_link_tokens_email ON magic_link_tokens(email);
+CREATE INDEX IF NOT EXISTS idx_magic_link_tokens_hash ON magic_link_tokens(token_hash);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_version WHERE version = 9) THEN
+        INSERT INTO schema_version (version) VALUES (9);
+    END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS auth_providers (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL,
+    provider_user_id TEXT NOT NULL,
+    linked_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (provider, provider_user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_auth_providers_user_id ON auth_providers(user_id);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_version WHERE version = 10) THEN
+        INSERT INTO schema_version (version) VALUES (10);
+    END IF;
+END $$;
