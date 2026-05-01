@@ -289,12 +289,13 @@ def create_source(conn, name: str, user_id: int, source_type_id: int | None = No
                   year: str | None = None, url: str | None = None,
                   accessed_date: str | None = None, edition: str | None = None,
                   pages: str | None = None, extra_notes: str | None = None,
-                  publisher_id: int | None = None) -> int:
+                  publisher_id: int | None = None, location: str | None = None,
+                  date: str | None = None) -> int:
     cur = conn.cursor()
     cur.execute(
-        """INSERT INTO sources (name, source_type_id, year, url, accessed_date, edition, pages, extra_notes, publisher_id, user_id)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
-        (name, source_type_id, year, url, accessed_date, edition, pages, extra_notes, publisher_id, user_id),
+        """INSERT INTO sources (name, source_type_id, year, url, accessed_date, edition, pages, extra_notes, publisher_id, location, date, user_id)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+        (name, source_type_id, year, url, accessed_date, edition, pages, extra_notes, publisher_id, location, date, user_id),
     )
     row = cur.fetchone()
     conn.commit()
@@ -336,6 +337,28 @@ def get_all_sources(conn, user_id: int) -> list[dict]:
     return cur.fetchall()
 
 
+_SOURCE_UPDATABLE = {
+    "name", "source_type_id", "year", "url", "accessed_date",
+    "edition", "pages", "extra_notes", "publisher_id", "location", "date",
+}
+
+
+def update_source(conn, source_id: int, user_id: int, fields: dict) -> dict | None:
+    fields = {k: v for k, v in fields.items() if k in _SOURCE_UPDATABLE}
+    if not fields:
+        return get_source(conn, source_id, user_id)
+    set_clause = ", ".join(f"{k} = %s" for k in fields)
+    values = list(fields.values()) + [source_id, user_id]
+    cur = conn.cursor()
+    cur.execute(
+        f"UPDATE sources SET {set_clause} WHERE id = %s AND user_id = %s RETURNING *",
+        values,
+    )
+    row = cur.fetchone()
+    conn.commit()
+    return row
+
+
 def get_sources_by_author(conn, author_last: str, author_first: str, user_id: int) -> list[dict]:
     cur = conn.cursor()
     cur.execute(
@@ -369,6 +392,22 @@ def create_source_type(conn, name: str) -> int:
     row = cur.fetchone()
     conn.commit()
     return row["id"]
+
+
+def get_source_type_by_name(conn, name: str) -> dict | None:
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM source_types WHERE LOWER(name) = LOWER(%s)", (name.strip(),))
+    return cur.fetchone()
+
+
+def get_or_create_source_type_by_name(conn, name: str) -> int:
+    name = name.strip()
+    if not name:
+        raise ValueError("source type name required")
+    existing = get_source_type_by_name(conn, name)
+    if existing:
+        return existing["id"]
+    return create_source_type(conn, name)
 
 
 # --- Publishers ---
@@ -502,6 +541,55 @@ def get_recent_authors(conn, user_id: int, limit: int = 10) -> list[dict]:
     return cur.fetchall()
 
 
+def delete_author(conn, author_id: int, user_id: int) -> bool:
+    """Delete a source_author the user owns (via source ownership)."""
+    cur = conn.cursor()
+    cur.execute(
+        """DELETE FROM source_authors
+           WHERE id = %s
+             AND source_id IN (SELECT id FROM sources WHERE user_id = %s)""",
+        (author_id, user_id),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def get_author(conn, author_id: int, user_id: int) -> dict | None:
+    """Return an author row only if their parent source belongs to the user."""
+    cur = conn.cursor()
+    cur.execute(
+        """SELECT sa.* FROM source_authors sa
+           JOIN sources s ON sa.source_id = s.id
+           WHERE sa.id = %s AND s.user_id = %s""",
+        (author_id, user_id),
+    )
+    return cur.fetchone()
+
+
+def update_author(conn, author_id: int, user_id: int, first_name: str | None, last_name: str | None) -> dict | None:
+    """Update first/last name on an author the user owns (via source ownership)."""
+    fields: dict = {}
+    if first_name is not None:
+        fields["first_name"] = first_name
+    if last_name is not None:
+        fields["last_name"] = last_name
+    if not fields:
+        return get_author(conn, author_id, user_id)
+    set_clause = ", ".join(f"{k} = %s" for k in fields)
+    values = list(fields.values()) + [author_id, user_id]
+    cur = conn.cursor()
+    cur.execute(
+        f"""UPDATE source_authors SET {set_clause}
+            WHERE id = %s
+              AND source_id IN (SELECT id FROM sources WHERE user_id = %s)
+            RETURNING *""",
+        values,
+    )
+    row = cur.fetchone()
+    conn.commit()
+    return row
+
+
 def search_authors(conn, prefix: str, user_id: int, limit: int = 20) -> list[dict]:
     p = f"{prefix}%"
     cur = conn.cursor()
@@ -610,6 +698,14 @@ def get_tags_for_note(conn, note_id: int) -> list[dict]:
     return cur.fetchall()
 
 
+def delete_tag(conn, tag_id: int, user_id: int) -> bool:
+    """Delete a tag. note_tags rows cascade via FK."""
+    cur = conn.cursor()
+    cur.execute("DELETE FROM tags WHERE id = %s AND user_id = %s", (tag_id, user_id))
+    conn.commit()
+    return cur.rowcount > 0
+
+
 def get_tags_for_notes(conn, note_ids: list[int], user_id: int) -> dict[int, list[dict]]:
     """Return {note_id: [tag_rows]} for a batch of note ids."""
     if not note_ids:
@@ -687,3 +783,38 @@ def build_citation(conn, source_id: int, user_id: int) -> str:
         parts.append(f'Accessed {src["accessed_date"]}.')
 
     return " ".join(parts)
+
+
+# --- Magic Links ---
+
+def create_magic_link(conn, user_id: int, email: str, token: str, expires_at) -> None:
+    cur = conn.cursor()
+    cur.execute(
+        """INSERT INTO magic_links (token, user_id, email, expires_at)
+           VALUES (%s, %s, %s, %s)""",
+        (token, user_id, email, expires_at),
+    )
+    conn.commit()
+
+
+def consume_magic_link(conn, token: str) -> dict | None:
+    """Atomically claim a valid (unused, unexpired) magic link. Returns row or None."""
+    cur = conn.cursor()
+    cur.execute(
+        """UPDATE magic_links
+           SET used_at = NOW()
+           WHERE token = %s
+             AND used_at IS NULL
+             AND expires_at > NOW()
+           RETURNING *""",
+        (token,),
+    )
+    row = cur.fetchone()
+    conn.commit()
+    return row
+
+
+def cleanup_expired_magic_links(conn) -> None:
+    cur = conn.cursor()
+    cur.execute("DELETE FROM magic_links WHERE expires_at < NOW() - INTERVAL '7 days'")
+    conn.commit()

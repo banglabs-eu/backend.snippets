@@ -45,7 +45,7 @@ curl http://localhost:8000/health
 Caddy is included in `docker-compose.yml` and handles TLS certificates automatically via Let's Encrypt.
 
 1. Point your domain's DNS A record to your server's IP.
-2. Edit `Caddyfile` — replace `yourdomain.com` with your actual domain.
+2. Edit `Caddyfile` and set your domain (currently `backend.snippets.eu`).
 3. Create `.env.prod` with a real `JWT_SECRET` (`openssl rand -hex 32`), `DEBUG=false`, and your `DATABASE_URL`.
 4. Start:
 

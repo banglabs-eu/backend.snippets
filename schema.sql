@@ -88,16 +88,14 @@ INSERT INTO source_types (name) VALUES ('Magazine') ON CONFLICT DO NOTHING;
 INSERT INTO source_types (name) VALUES ('YouTube Video') ON CONFLICT DO NOTHING;
 INSERT INTO source_types (name) VALUES ('Other') ON CONFLICT DO NOTHING;
 
--- Migration: add user_id columns to existing tables if they don't have them
+-- === Migration v2: add user_id columns to existing tables ===
+-- (The CREATE TABLE statements above already include user_id for fresh installs;
+--  the ALTERs catch databases that pre-date multi-tenancy.)
 ALTER TABLE notes ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id);
 ALTER TABLE sources ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id);
 ALTER TABLE source_publishers ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id);
 ALTER TABLE tags ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id);
 
--- Drop the old unique constraint on tags.name and add (name, user_id) if needed
--- (handled idempotently: the CREATE TABLE above uses the new UNIQUE)
-
--- Set schema version (v2)
 INSERT INTO schema_version (version) VALUES (2) ON CONFLICT (version) DO NOTHING;
 
 -- === Migration v3: enforce NOT NULL on user_id, add ON DELETE CASCADE ===
@@ -194,5 +192,44 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM schema_version WHERE version = 8) THEN
         ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL;
         INSERT INTO schema_version (version) VALUES (8);
+    END IF;
+END $$;
+
+-- === Migration v9: magic links for passwordless sign-in ===
+CREATE TABLE IF NOT EXISTS magic_links (
+    token TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    email TEXT NOT NULL,
+    expires_at TIMESTAMP NOT NULL,
+    used_at TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_magic_links_user_id ON magic_links(user_id);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_version WHERE version = 9) THEN
+        INSERT INTO schema_version (version) VALUES (9);
+    END IF;
+END $$;
+
+-- === Migration v10: location column on sources (e.g., lecture venues) ===
+ALTER TABLE sources ADD COLUMN IF NOT EXISTS location TEXT;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_version WHERE version = 10) THEN
+        INSERT INTO schema_version (version) VALUES (10);
+    END IF;
+END $$;
+
+-- === Migration v11: date column on sources (e.g., when a lecture was given) ===
+ALTER TABLE sources ADD COLUMN IF NOT EXISTS date TEXT;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_version WHERE version = 11) THEN
+        INSERT INTO schema_version (version) VALUES (11);
     END IF;
 END $$;
