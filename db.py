@@ -23,8 +23,6 @@ def init_db(database_url: str, minconn: int = 2, maxconn: int = 10):
         cur.execute(sql)
         # Clean up login attempts older than 30 days
         cur.execute("DELETE FROM login_attempts WHERE attempted_at < NOW() - INTERVAL '30 days'")
-        # Clean up expired/used magic link tokens older than 1 day
-        cur.execute("DELETE FROM magic_link_tokens WHERE (used = TRUE OR expires_at < NOW()) AND created_at < NOW() - INTERVAL '1 day'")
         conn.commit()
     finally:
         pool.putconn(conn)
@@ -168,55 +166,6 @@ def get_invite_codes(conn, created_by: int) -> list[dict]:
         (created_by,),
     )
     return cur.fetchall()
-
-
-# --- Magic Link Tokens ---
-
-MAGIC_LINK_EXPIRY_MINUTES = 10
-MAGIC_LINK_RATE_PER_EMAIL = 3
-MAGIC_LINK_RATE_WINDOW_MINUTES = 15
-MAGIC_LINK_RATE_PER_IP = 5
-MAGIC_LINK_RATE_IP_WINDOW_MINUTES = 10
-
-
-def create_magic_link_token(conn, token_hash: str, email: str, expires_at) -> int:
-    """Store a hashed magic link token. Invalidates any previous unused tokens for this email."""
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE magic_link_tokens SET used = TRUE WHERE email = %s AND used = FALSE",
-        (email.lower().strip(),),
-    )
-    cur.execute(
-        "INSERT INTO magic_link_tokens (token_hash, email, expires_at) VALUES (%s, %s, %s) RETURNING id",
-        (token_hash, email.lower().strip(), expires_at),
-    )
-    row = cur.fetchone()
-    conn.commit()
-    return row["id"]
-
-
-def get_magic_link_token(conn, token_hash: str) -> dict | None:
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT * FROM magic_link_tokens WHERE token_hash = %s AND used = FALSE AND expires_at > NOW()",
-        (token_hash,),
-    )
-    return cur.fetchone()
-
-
-def mark_magic_link_used(conn, token_id: int):
-    cur = conn.cursor()
-    cur.execute("UPDATE magic_link_tokens SET used = TRUE WHERE id = %s", (token_id,))
-    conn.commit()
-
-
-def count_recent_magic_links_for_email(conn, email: str) -> int:
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT COUNT(*) FROM magic_link_tokens WHERE email = %s AND created_at > NOW() - make_interval(mins => %s)",
-        (email.lower().strip(), MAGIC_LINK_RATE_WINDOW_MINUTES),
-    )
-    return cur.fetchone()["count"]
 
 
 # --- Login Attempt Tracking ---
