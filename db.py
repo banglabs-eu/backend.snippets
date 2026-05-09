@@ -20,10 +20,16 @@ def init_db(database_url: str, minconn: int = 2, maxconn: int = 10):
         with open(schema_path, "r") as f:
             sql = f.read()
         cur = conn.cursor()
-        cur.execute(sql)
-        # Clean up login attempts older than 30 days
-        cur.execute("DELETE FROM login_attempts WHERE attempted_at < NOW() - INTERVAL '30 days'")
-        conn.commit()
+        # Serialize schema setup across uvicorn workers — without this, parallel
+        # workers race for AccessExclusiveLock on the same tables and deadlock.
+        cur.execute("SELECT pg_advisory_lock(7340271)")
+        try:
+            cur.execute(sql)
+            cur.execute("DELETE FROM login_attempts WHERE attempted_at < NOW() - INTERVAL '30 days'")
+            conn.commit()
+        finally:
+            cur.execute("SELECT pg_advisory_unlock(7340271)")
+            conn.commit()
     finally:
         pool.putconn(conn)
     return pool
