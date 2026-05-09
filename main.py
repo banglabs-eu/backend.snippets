@@ -15,6 +15,7 @@ from routers import auth as auth_router
 from routers import authors as authors_router
 from routers import invite_codes as invite_codes_router
 from routers import notes as notes_router
+from routers import posts as posts_router
 from routers import publishers as publishers_router
 from routers import source_types as source_types_router
 from routers import sources as sources_router
@@ -73,7 +74,8 @@ async def request_middleware(request: Request, call_next):
     conn = app.state.pool.getconn()
     request.state.conn = conn
     try:
-        if request.url.path not in _PUBLIC_PATHS:
+        path = request.url.path
+        if path not in _PUBLIC_PATHS and not path.startswith("/public/"):
             header = request.headers.get("Authorization", "")
             if not header.startswith("Bearer "):
                 return JSONResponse(status_code=401, content={"detail": "Missing token"})
@@ -120,6 +122,7 @@ def version(request: Request):
 app.include_router(auth_router.router)
 app.include_router(invite_codes_router.router)
 app.include_router(notes_router.router)
+app.include_router(posts_router.router)
 app.include_router(sources_router.router)
 app.include_router(source_types_router.router)
 app.include_router(publishers_router.router)

@@ -243,3 +243,31 @@ BEGIN
         INSERT INTO schema_version (version) VALUES (12);
     END IF;
 END $$;
+
+-- === Migration v13: posts (long-form text composed from multiple notes) ===
+CREATE TABLE IF NOT EXISTS posts (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    body TEXT NOT NULL DEFAULT '',
+    published BOOLEAN NOT NULL DEFAULT FALSE,
+    published_at TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS post_notes (
+    post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+    note_id INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+    PRIMARY KEY (post_id, note_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_posts_user_id ON posts(user_id);
+CREATE INDEX IF NOT EXISTS idx_posts_published ON posts(published) WHERE published;
+CREATE INDEX IF NOT EXISTS idx_post_notes_note_id ON post_notes(note_id);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_version WHERE version = 13) THEN
+        INSERT INTO schema_version (version) VALUES (13);
+    END IF;
+END $$;

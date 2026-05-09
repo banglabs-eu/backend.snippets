@@ -820,3 +820,118 @@ def consume_magic_link(conn, token: str) -> dict | None:
     return row
 
 
+# --- Posts ---
+
+def create_post(conn, user_id: int, body: str, published: bool = False) -> int:
+    cur = conn.cursor()
+    if published:
+        cur.execute(
+            """INSERT INTO posts (user_id, body, published, published_at, updated_at)
+               VALUES (%s, %s, TRUE, NOW(), NOW())
+               RETURNING id""",
+            (user_id, body),
+        )
+    else:
+        cur.execute(
+            "INSERT INTO posts (user_id, body) VALUES (%s, %s) RETURNING id",
+            (user_id, body),
+        )
+    post_id = cur.fetchone()["id"]
+    conn.commit()
+    return post_id
+
+
+def get_post(conn, post_id: int, user_id: int) -> dict | None:
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT * FROM posts WHERE id = %s AND user_id = %s",
+        (post_id, user_id),
+    )
+    return cur.fetchone()
+
+
+def get_public_post(conn, post_id: int) -> dict | None:
+    """Fetch a post for unauthenticated viewing. Returns None unless published=TRUE."""
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, body, published_at, created_at, updated_at FROM posts WHERE id = %s AND published = TRUE",
+        (post_id,),
+    )
+    return cur.fetchone()
+
+
+def list_posts(conn, user_id: int) -> list[dict]:
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT * FROM posts WHERE user_id = %s ORDER BY COALESCE(updated_at, created_at) DESC",
+        (user_id,),
+    )
+    return cur.fetchall()
+
+
+def update_post(
+    conn,
+    post_id: int,
+    user_id: int,
+    body: str | None = None,
+    published: bool | None = None,
+) -> bool:
+    """Patch a post's body and/or published flag. Stamps updated_at; sets published_at on first publish."""
+    sets = ["updated_at = NOW()"]
+    params: list = []
+    if body is not None:
+        sets.append("body = %s")
+        params.append(body)
+    if published is True:
+        sets.append("published = TRUE")
+        sets.append("published_at = COALESCE(published_at, NOW())")
+    elif published is False:
+        sets.append("published = FALSE")
+    params.extend([post_id, user_id])
+    cur = conn.cursor()
+    cur.execute(
+        f"UPDATE posts SET {', '.join(sets)} WHERE id = %s AND user_id = %s",
+        params,
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def delete_post(conn, post_id: int, user_id: int) -> bool:
+    cur = conn.cursor()
+    cur.execute("DELETE FROM posts WHERE id = %s AND user_id = %s", (post_id, user_id))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def sync_post_notes(conn, post_id: int, note_ids: list[int], user_id: int) -> list[int]:
+    """Replace post_notes rows for a post with the given note_ids, filtered to notes the user owns.
+    Returns the actual stored note_ids."""
+    cur = conn.cursor()
+    cur.execute("DELETE FROM post_notes WHERE post_id = %s", (post_id,))
+    if note_ids:
+        # Keep only notes that exist and belong to the user.
+        placeholders = ",".join("%s" for _ in note_ids)
+        cur.execute(
+            f"SELECT id FROM notes WHERE id IN ({placeholders}) AND user_id = %s",
+            note_ids + [user_id],
+        )
+        valid_ids = [r["id"] for r in cur.fetchall()]
+        for nid in valid_ids:
+            cur.execute(
+                "INSERT INTO post_notes (post_id, note_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                (post_id, nid),
+            )
+    else:
+        valid_ids = []
+    conn.commit()
+    return valid_ids
+
+
+def get_post_note_ids(conn, post_id: int) -> list[int]:
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT note_id FROM post_notes WHERE post_id = %s ORDER BY note_id",
+        (post_id,),
+    )
+    return [r["note_id"] for r in cur.fetchall()]
