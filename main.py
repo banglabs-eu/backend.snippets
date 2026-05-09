@@ -56,6 +56,7 @@ app.add_middleware(
 
 _PUBLIC_PATHS = {
     "/health",
+    "/version",
     "/register",
     "/login",
     "/auth/google",
@@ -97,6 +98,21 @@ async def request_middleware(request: Request, call_next):
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/version")
+def version(request: Request):
+    with request.state.conn.cursor() as cur:
+        cur.execute("SELECT MAX(version) AS v FROM schema_version")
+        row = cur.fetchone()
+        schema_v = row["v"] if row else None
+    return {
+        "version": os.environ.get("APP_VERSION", "unknown"),
+        "branch": os.environ.get("APP_BRANCH", "unknown"),
+        "sha": os.environ.get("APP_SHA", "unknown"),
+        "built_at": os.environ.get("APP_BUILT_AT", "unknown"),
+        "schema_version": schema_v,
+    }
 
 
 # --- Routers ---

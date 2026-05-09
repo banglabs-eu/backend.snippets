@@ -1,3 +1,3 @@
-backend.snippets.eu {
+api.snippets.eu {
     reverse_proxy backend:8000
 }
