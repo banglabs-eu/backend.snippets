@@ -127,9 +127,9 @@ BEGIN
 END $$;
 
 -- === Migration v4: revoked_tokens table for JWT logout ===
+-- (revoked_at column was removed in v12)
 CREATE TABLE IF NOT EXISTS revoked_tokens (
-    jti TEXT PRIMARY KEY,
-    revoked_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    jti TEXT PRIMARY KEY
 );
 
 DO $$
@@ -231,5 +231,15 @@ DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM schema_version WHERE version = 11) THEN
         INSERT INTO schema_version (version) VALUES (11);
+    END IF;
+END $$;
+
+-- === Migration v12: drop unused revoked_at column from revoked_tokens ===
+ALTER TABLE revoked_tokens DROP COLUMN IF EXISTS revoked_at;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_version WHERE version = 12) THEN
+        INSERT INTO schema_version (version) VALUES (12);
     END IF;
 END $$;

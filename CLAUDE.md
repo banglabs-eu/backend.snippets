@@ -67,7 +67,7 @@ Caddyfile            Reverse proxy + automatic Let's Encrypt TLS
   - *Magic link*: `magic_links` table stores single-use tokens with `expires_at`. `MAGIC_LINK_TTL_MINUTES` (default 10) and `MAGIC_LINK_BASE_URL` (default `http://localhost:5173`). Endpoint always returns `{ok: true}` to avoid leaking which emails are registered.
   - *Logout*: revokes the current `jti` into `revoked_tokens`.
 - **Registration is invite-gated**: `POST /register` requires a valid `invite_code`. Codes are created via `POST /invite-codes` by the admin user (username = `INVITE_ADMIN`, default `adam`). If invite consumption fails after user creation, the user is rolled back.
-- **Schema migrations**: idempotent ALTER TABLEs and `DO $$ ... IF NOT EXISTS (SELECT 1 FROM schema_version WHERE version = N) ... INSERT INTO schema_version VALUES (N) ... END $$`. To add a migration, append a new block, then bump tracked version. **Current version is 11** (locations + dates on sources for things like lectures).
+- **Schema migrations**: idempotent ALTER TABLEs and `DO $$ ... IF NOT EXISTS (SELECT 1 FROM schema_version WHERE version = N) ... INSERT INTO schema_version VALUES (N) ... END $$`. To add a migration, append a new block, then bump tracked version. **Current version is 12** (drops unused `revoked_tokens.revoked_at`).
 - **Env file selection**: `main.py` calls `load_dotenv(f".env.{APP_ENV}")` (default `dev`). Docker compose sets `APP_ENV` via the `ENV` variable.
 - **HTTPS**: Production uses Caddy as a reverse proxy in `docker-compose.yml`. Caddy auto-provisions TLS via Let's Encrypt. Port 8000 is bound to `127.0.0.1` so only Caddy can reach uvicorn.
 - **CORS**: `ALLOWED_ORIGINS` env var (comma-separated). `allow_credentials=True` for the browser frontend.

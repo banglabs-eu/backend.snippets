@@ -98,44 +98,6 @@ def update_user_password(conn, user_id: int, password_hash: str):
     conn.commit()
 
 
-def get_user_by_email(conn, email: str) -> dict | None:
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM users WHERE email = %s", (email.lower().strip(),))
-    return cur.fetchone()
-
-
-def create_user_from_email(conn, email: str) -> dict:
-    """Create a user from email alone (no password). Username defaults to email prefix."""
-    email = email.lower().strip()
-    username = email.split("@")[0]
-    # Ensure unique username by appending digits if needed
-    cur = conn.cursor()
-    candidate = username
-    suffix = 1
-    while True:
-        cur.execute("SELECT 1 FROM users WHERE username = %s", (candidate,))
-        if cur.fetchone() is None:
-            break
-        candidate = f"{username}{suffix}"
-        suffix += 1
-    cur.execute(
-        "INSERT INTO users (username, password_hash, email, email_verified) VALUES (%s, NULL, %s, TRUE) RETURNING id, username, email, created_at",
-        (candidate, email),
-    )
-    row = cur.fetchone()
-    conn.commit()
-    return row
-
-
-def set_user_email(conn, user_id: int, email: str):
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE users SET email = %s, email_verified = TRUE WHERE id = %s",
-        (email.lower().strip(), user_id),
-    )
-    conn.commit()
-
-
 # --- Invite Codes ---
 
 def create_invite_code(conn, created_by: int | None = None) -> str:
@@ -298,18 +260,6 @@ def get_notes_by_author(conn, author_id: int, user_id: int) -> list[dict]:
            WHERE sa.id = %s AND n.user_id = %s
            ORDER BY n.created_at ASC""",
         (author_id, user_id),
-    )
-    return cur.fetchall()
-
-
-def get_notes_by_ids(conn, note_ids: list[int], user_id: int) -> list[dict]:
-    if not note_ids:
-        return []
-    placeholders = ",".join("%s" for _ in note_ids)
-    cur = conn.cursor()
-    cur.execute(
-        f"SELECT * FROM notes WHERE id IN ({placeholders}) AND user_id = %s ORDER BY created_at ASC",
-        note_ids + [user_id],
     )
     return cur.fetchall()
 
@@ -681,13 +631,6 @@ def get_tag(conn, tag_id: int, user_id: int) -> dict | None:
     return cur.fetchone()
 
 
-def delete_tag(conn, tag_id: int, user_id: int):
-    cur = conn.cursor()
-    cur.execute("DELETE FROM note_tags WHERE tag_id = %s", (tag_id,))
-    cur.execute("DELETE FROM tags WHERE id = %s AND user_id = %s", (tag_id, user_id))
-    conn.commit()
-
-
 def get_tag_by_name(conn, name: str, user_id: int) -> dict | None:
     cur = conn.cursor()
     cur.execute("SELECT * FROM tags WHERE name = %s AND user_id = %s", (name.strip().lower(), user_id))
@@ -877,7 +820,3 @@ def consume_magic_link(conn, token: str) -> dict | None:
     return row
 
 
-def cleanup_expired_magic_links(conn) -> None:
-    cur = conn.cursor()
-    cur.execute("DELETE FROM magic_links WHERE expires_at < NOW() - INTERVAL '7 days'")
-    conn.commit()
