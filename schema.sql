@@ -4,6 +4,50 @@ CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY
 );
 
+-- ===========================================================================
+-- Migration v16: rename `notes` family to `snippets` family.
+-- ===========================================================================
+-- Frontend calls them snippets; the backend tables used to be called notes.
+-- This block sits BEFORE the CREATE TABLE statements that use the new names so
+-- a pre-v16 DB gets renamed before CREATE TABLE IF NOT EXISTS would otherwise
+-- create empty husks that conflict with the rename.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'notes')
+       AND NOT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'snippets') THEN
+        ALTER TABLE notes RENAME TO snippets;
+        ALTER INDEX IF EXISTS idx_notes_created_at RENAME TO idx_snippets_created_at;
+        ALTER INDEX IF EXISTS idx_notes_source_id  RENAME TO idx_snippets_source_id;
+        ALTER INDEX IF EXISTS idx_notes_user_id    RENAME TO idx_snippets_user_id;
+        ALTER INDEX IF EXISTS idx_notes_published  RENAME TO idx_snippets_published;
+        ALTER SEQUENCE IF EXISTS notes_id_seq RENAME TO snippets_id_seq;
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'note_tags')
+       AND NOT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'snippet_tags') THEN
+        ALTER TABLE note_tags RENAME TO snippet_tags;
+        ALTER TABLE snippet_tags RENAME COLUMN note_id TO snippet_id;
+        ALTER INDEX IF EXISTS idx_note_tags_note_id RENAME TO idx_snippet_tags_snippet_id;
+        ALTER INDEX IF EXISTS idx_note_tags_tag_id  RENAME TO idx_snippet_tags_tag_id;
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'post_notes')
+       AND NOT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'post_snippets') THEN
+        ALTER TABLE post_notes RENAME TO post_snippets;
+        ALTER TABLE post_snippets RENAME COLUMN note_id TO snippet_id;
+        ALTER INDEX IF EXISTS idx_post_notes_note_id RENAME TO idx_post_snippets_snippet_id;
+    END IF;
+END $$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_version WHERE version = 16) THEN
+        INSERT INTO schema_version (version) VALUES (16);
+    END IF;
+END $$;
+
+-- ===========================================================================
+-- Core tables (declarations use the post-v16 names everywhere).
+-- ===========================================================================
+
 CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
     username TEXT NOT NULL UNIQUE,
@@ -46,7 +90,7 @@ CREATE TABLE IF NOT EXISTS source_authors (
     author_order INTEGER NOT NULL DEFAULT 0
 );
 
-CREATE TABLE IF NOT EXISTS notes (
+CREATE TABLE IF NOT EXISTS snippets (
     id SERIAL PRIMARY KEY,
     body TEXT NOT NULL,
     source_id INTEGER REFERENCES sources(id),
@@ -63,20 +107,20 @@ CREATE TABLE IF NOT EXISTS tags (
     UNIQUE (name, user_id)
 );
 
-CREATE TABLE IF NOT EXISTS note_tags (
-    note_id INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+CREATE TABLE IF NOT EXISTS snippet_tags (
+    snippet_id INTEGER NOT NULL REFERENCES snippets(id) ON DELETE CASCADE,
     tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
-    PRIMARY KEY (note_id, tag_id)
+    PRIMARY KEY (snippet_id, tag_id)
 );
 
 -- Indexes
-CREATE INDEX IF NOT EXISTS idx_notes_created_at ON notes(created_at);
-CREATE INDEX IF NOT EXISTS idx_notes_source_id ON notes(source_id);
-CREATE INDEX IF NOT EXISTS idx_notes_user_id ON notes(user_id);
+CREATE INDEX IF NOT EXISTS idx_snippets_created_at ON snippets(created_at);
+CREATE INDEX IF NOT EXISTS idx_snippets_source_id ON snippets(source_id);
+CREATE INDEX IF NOT EXISTS idx_snippets_user_id ON snippets(user_id);
 CREATE INDEX IF NOT EXISTS idx_sources_name ON sources(name);
 CREATE INDEX IF NOT EXISTS idx_sources_user_id ON sources(user_id);
-CREATE INDEX IF NOT EXISTS idx_note_tags_note_id ON note_tags(note_id);
-CREATE INDEX IF NOT EXISTS idx_note_tags_tag_id ON note_tags(tag_id);
+CREATE INDEX IF NOT EXISTS idx_snippet_tags_snippet_id ON snippet_tags(snippet_id);
+CREATE INDEX IF NOT EXISTS idx_snippet_tags_tag_id ON snippet_tags(tag_id);
 CREATE INDEX IF NOT EXISTS idx_source_authors_source_order ON source_authors(source_id, author_order);
 CREATE INDEX IF NOT EXISTS idx_source_publishers_user_id ON source_publishers(user_id);
 CREATE INDEX IF NOT EXISTS idx_tags_user_id ON tags(user_id);
@@ -91,7 +135,7 @@ INSERT INTO source_types (name) VALUES ('Other') ON CONFLICT DO NOTHING;
 -- === Migration v2: add user_id columns to existing tables ===
 -- (The CREATE TABLE statements above already include user_id for fresh installs;
 --  the ALTERs catch databases that pre-date multi-tenancy.)
-ALTER TABLE notes ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id);
+ALTER TABLE snippets ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id);
 ALTER TABLE sources ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id);
 ALTER TABLE source_publishers ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id);
 ALTER TABLE tags ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id);
@@ -103,7 +147,7 @@ DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM schema_version WHERE version = 3) THEN
         -- Enforce NOT NULL on user_id columns
-        ALTER TABLE notes ALTER COLUMN user_id SET NOT NULL;
+        ALTER TABLE snippets ALTER COLUMN user_id SET NOT NULL;
         ALTER TABLE sources ALTER COLUMN user_id SET NOT NULL;
         ALTER TABLE source_publishers ALTER COLUMN user_id SET NOT NULL;
         ALTER TABLE tags ALTER COLUMN user_id SET NOT NULL;
@@ -113,13 +157,17 @@ BEGIN
         ALTER TABLE source_authors ADD CONSTRAINT source_authors_source_id_fkey
             FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE CASCADE;
 
-        -- Drop and re-add note_tags FKs with CASCADE
-        ALTER TABLE note_tags DROP CONSTRAINT IF EXISTS note_tags_note_id_fkey;
-        ALTER TABLE note_tags ADD CONSTRAINT note_tags_note_id_fkey
-            FOREIGN KEY (note_id) REFERENCES notes(id) ON DELETE CASCADE;
+        -- Drop and re-add snippet_tags FKs with CASCADE
+        -- (constraint names retain "note_tags_*" on pre-v16 DBs that ran v3 before
+        --  the rename; drop both possible names.)
+        ALTER TABLE snippet_tags DROP CONSTRAINT IF EXISTS snippet_tags_snippet_id_fkey;
+        ALTER TABLE snippet_tags DROP CONSTRAINT IF EXISTS note_tags_note_id_fkey;
+        ALTER TABLE snippet_tags ADD CONSTRAINT snippet_tags_snippet_id_fkey
+            FOREIGN KEY (snippet_id) REFERENCES snippets(id) ON DELETE CASCADE;
 
-        ALTER TABLE note_tags DROP CONSTRAINT IF EXISTS note_tags_tag_id_fkey;
-        ALTER TABLE note_tags ADD CONSTRAINT note_tags_tag_id_fkey
+        ALTER TABLE snippet_tags DROP CONSTRAINT IF EXISTS snippet_tags_tag_id_fkey;
+        ALTER TABLE snippet_tags DROP CONSTRAINT IF EXISTS note_tags_tag_id_fkey;
+        ALTER TABLE snippet_tags ADD CONSTRAINT snippet_tags_tag_id_fkey
             FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE;
 
         INSERT INTO schema_version (version) VALUES (3);
@@ -172,8 +220,8 @@ BEGIN
     END IF;
 END $$;
 
--- === Migration v7: updated_at column on notes ===
-ALTER TABLE notes ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP;
+-- === Migration v7: updated_at column on snippets ===
+ALTER TABLE snippets ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP;
 
 DO $$
 BEGIN
@@ -244,7 +292,7 @@ BEGIN
     END IF;
 END $$;
 
--- === Migration v13: posts (long-form text composed from multiple notes) ===
+-- === Migration v13: posts (long-form text composed from multiple snippets) ===
 CREATE TABLE IF NOT EXISTS posts (
     id SERIAL PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES users(id),
@@ -255,19 +303,62 @@ CREATE TABLE IF NOT EXISTS posts (
     updated_at TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS post_notes (
+CREATE TABLE IF NOT EXISTS post_snippets (
     post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
-    note_id INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
-    PRIMARY KEY (post_id, note_id)
+    snippet_id INTEGER NOT NULL REFERENCES snippets(id) ON DELETE CASCADE,
+    PRIMARY KEY (post_id, snippet_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_posts_user_id ON posts(user_id);
 CREATE INDEX IF NOT EXISTS idx_posts_published ON posts(published) WHERE published;
-CREATE INDEX IF NOT EXISTS idx_post_notes_note_id ON post_notes(note_id);
+CREATE INDEX IF NOT EXISTS idx_post_snippets_snippet_id ON post_snippets(snippet_id);
 
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM schema_version WHERE version = 13) THEN
         INSERT INTO schema_version (version) VALUES (13);
+    END IF;
+END $$;
+
+-- === Migration v14: posts.title + posts.slug for /post/<username>/<slug> URLs ===
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS title TEXT NOT NULL DEFAULT '';
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS slug TEXT NOT NULL DEFAULT '';
+
+-- Slug must be unique per user (drafts with empty slug excluded by partial index).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_posts_user_slug
+    ON posts(user_id, slug) WHERE slug <> '';
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_version WHERE version = 14) THEN
+        INSERT INTO schema_version (version) VALUES (14);
+    END IF;
+END $$;
+
+-- === Migration v15: per-snippet publish + per-tag publish ===
+-- A snippet becomes public independently of any post. When a snippet is public,
+-- any source it points to is also publicly visible (derived via JOIN on read).
+ALTER TABLE snippets ADD COLUMN IF NOT EXISTS published BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE snippets ADD COLUMN IF NOT EXISTS published_at TIMESTAMP;
+ALTER TABLE tags     ADD COLUMN IF NOT EXISTS published BOOLEAN NOT NULL DEFAULT FALSE;
+
+CREATE INDEX IF NOT EXISTS idx_snippets_published ON snippets(published) WHERE published;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_version WHERE version = 15) THEN
+        INSERT INTO schema_version (version) VALUES (15);
+    END IF;
+END $$;
+
+-- === Migration v17: allow magic_links.user_id to be NULL ===
+-- A row with user_id=NULL represents a "registration intent" — the email has
+-- been verified but no account exists yet. Completing registration consumes
+-- the link and creates the user. (v16 was the snippets/notes rename.)
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_version WHERE version = 17) THEN
+        ALTER TABLE magic_links ALTER COLUMN user_id DROP NOT NULL;
+        INSERT INTO schema_version (version) VALUES (17);
     END IF;
 END $$;

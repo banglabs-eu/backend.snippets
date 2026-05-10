@@ -2,6 +2,17 @@
 
 If SMTP_HOST is not configured, links are logged to stdout instead of sent —
 useful for local development.
+
+For Brevo (formerly Sendinblue) transactional SMTP, set:
+
+    SMTP_HOST=smtp-relay.brevo.com
+    SMTP_PORT=587
+    SMTP_USER=<your brevo SMTP login, usually an email>
+    SMTP_PASS=<the SMTP key from brevo dashboard — *not* the API key>
+    SMTP_FROM=<a verified sender on your account, e.g. noreply@snippets.eu>
+
+Note: Brevo distinguishes between "API keys" (for the v3 transactional API)
+and "SMTP keys" (for this relay). Generate the SMTP key under SMTP & API → SMTP.
 """
 
 import logging
@@ -43,13 +54,18 @@ def send_email(to: str, subject: str, body: str) -> None:
 
 
 def send_magic_link(to: str, link: str) -> None:
+    """The link works for both sign-in (existing account) and sign-up
+    (new email — verify step will prompt for a username). Copy stays generic
+    so the same email body covers both paths."""
     send_email(
         to,
-        "Your Snippets sign-in link",
+        "Your Snippets link",
         (
-            "Click the link below to sign in to Snippets. It expires in 10 minutes "
-            "and can only be used once.\n\n"
+            "Click the link below to continue to Snippets. It expires in 10 "
+            "minutes and can only be used once.\n\n"
             f"{link}\n\n"
+            "If you don't have an account yet, this link will set one up; if "
+            "you do, it'll sign you in.\n\n"
             "If you didn't request this, you can ignore this email."
         ),
     )
