@@ -48,6 +48,10 @@ class ChangePasswordBody(BaseModel):
     new_password: str
 
 
+class SetPasswordBody(BaseModel):
+    password: str
+
+
 class MagicLinkRequestBody(BaseModel):
     email: EmailStr
 
@@ -254,6 +258,25 @@ def username_available(u: str = Query(default=""), request: Request = None):  # 
 def logout(request: Request):
     conn = get_conn(request)
     db.revoke_token(conn, request.state.jti)
+    return {"ok": True}
+
+
+@router.post("/auth/set-password")
+def set_password(body: SetPasswordBody, request: Request):
+    """Set an initial password on a passwordless account.
+
+    Used after magic-link signup to give the user a way to sign in without
+    going through email next time. Fails if the account already has a password
+    — those go through /change-password.
+    """
+    conn = get_conn(request)
+    uid = get_user_id(request)
+    user = db.get_user_by_id(conn, uid)
+    if user["password_hash"]:
+        raise HTTPException(status_code=400, detail="Password already set. Use change-password to update it.")
+    if len(body.password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    db.update_user_password(conn, uid, auth.hash_password(body.password))
     return {"ok": True}
 
 

@@ -110,3 +110,46 @@ def test_register_token_is_single_use(client):
     second = client.post("/auth/complete-registration",
                          json={"registration_token": reg_token, "username": "carol2"})
     assert second.status_code == 401
+
+
+def test_set_password_on_passwordless_account_then_login(client):
+    # Sign up via magic link — account is passwordless.
+    client.post("/auth/magic-link", json={"email": "dave@example.com"})
+    mlink = _latest_magic_link_token("dave@example.com")
+    reg = client.post("/auth/verify-magic-link", json={"token": mlink}).json()
+    completed = client.post("/auth/complete-registration",
+                            json={"registration_token": reg["registration_token"], "username": "dave"}).json()
+    jwt = completed["token"]
+    headers = {"Authorization": f"Bearer {jwt}"}
+
+    # Setting an initial password works on a passwordless account.
+    r = client.post("/auth/set-password", json={"password": "secret123"}, headers=headers)
+    assert r.status_code == 200, r.text
+
+    # That password now works at /login.
+    login = client.post("/login", json={"username": "dave", "password": "secret123"})
+    assert login.status_code == 200, login.text
+
+
+def test_set_password_rejects_when_already_set(client, make_user):
+    # User with a password already.
+    make_user(username="eve", password="initial-pw")
+    login = client.post("/login", json={"username": "eve", "password": "initial-pw"}).json()
+    headers = {"Authorization": f"Bearer {login['token']}"}
+
+    r = client.post("/auth/set-password", json={"password": "new-pw"}, headers=headers)
+    assert r.status_code == 400
+    assert "already set" in r.json()["detail"].lower()
+
+
+def test_set_password_enforces_min_length(client):
+    client.post("/auth/magic-link", json={"email": "frank@example.com"})
+    mlink = _latest_magic_link_token("frank@example.com")
+    reg = client.post("/auth/verify-magic-link", json={"token": mlink}).json()
+    completed = client.post("/auth/complete-registration",
+                            json={"registration_token": reg["registration_token"], "username": "frank"}).json()
+    headers = {"Authorization": f"Bearer {completed['token']}"}
+
+    short = client.post("/auth/set-password", json={"password": "12345"}, headers=headers)
+    assert short.status_code == 400
+    assert "at least 6" in short.json()["detail"]
