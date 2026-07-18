@@ -6,7 +6,16 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 import db
-from deps import get_conn, get_user_id, to_dict, to_list
+from deps import get_conn, get_user_id, get_username, to_dict, to_list
+from revalidate import (
+    TAG_DASHBOARD_GLOBAL,
+    TAG_POSTS_ALL,
+    revalidate,
+    tag_dashboard_user,
+    tag_post,
+    tag_posts_user,
+    tag_snippet,
+)
 
 
 router = APIRouter()
@@ -52,12 +61,13 @@ def _require_title_to_publish(title: str | None, current_title: str = "") -> Non
 
 # --- Authed endpoints ---
 
-def _propagate_publish_to_snippets(conn, body_text: str, user_id: int, public_tag_ids: list[int]) -> None:
+def _propagate_publish_to_snippets(conn, body_text: str, user_id: int, username: str, public_tag_ids: list[int]) -> None:
     """When a post is (re)published, mark each referenced snippet public and
     surface the user-selected tags. publish_snippet silently no-ops on snippets
     the user doesn't own."""
     for nid in _extract_snippet_ids(body_text or ""):
         db.publish_snippet(conn, nid, user_id, public_tag_ids)
+        revalidate(tag_snippet(username, nid), tag_dashboard_user(username), TAG_DASHBOARD_GLOBAL)
 
 
 @router.post("/posts")
@@ -69,7 +79,10 @@ def create_post(body: CreatePostBody, request: Request):
     post_id = db.create_post(conn, uid, body.body, title=body.title, published=body.published)
     db.sync_post_snippets(conn, post_id, _extract_snippet_ids(body.body), uid)
     if body.published:
-        _propagate_publish_to_snippets(conn, body.body, uid, body.public_tag_ids)
+        username = get_username(request)
+        _propagate_publish_to_snippets(conn, body.body, uid, username, body.public_tag_ids)
+        post = db.get_post(conn, post_id, uid)
+        revalidate(TAG_POSTS_ALL, tag_posts_user(username), tag_post(username, post["slug"]))
     return {"id": post_id}
 
 
@@ -101,11 +114,25 @@ def update_post(post_id: int, body: UpdatePostBody, request: Request):
     db.update_post(conn, post_id, uid, body=body.body, title=body.title, published=body.published)
     if body.body is not None:
         db.sync_post_snippets(conn, post_id, _extract_snippet_ids(body.body), uid)
-    if body.published is True:
-        # Propagate publish to referenced snippets + selected tags. Use the new body if
-        # provided, otherwise fall back to the existing one.
-        body_text = body.body if body.body is not None else current.get("body", "")
-        _propagate_publish_to_snippets(conn, body_text, uid, body.public_tag_ids)
+
+    was_published = bool(current.get("published"))
+    if was_published or body.published is True:
+        username = get_username(request)
+        if body.published is True:
+            # Propagate publish to referenced snippets + selected tags. Use the new body if
+            # provided, otherwise fall back to the existing one.
+            body_text = body.body if body.body is not None else current.get("body", "")
+            _propagate_publish_to_snippets(conn, body_text, uid, username, body.public_tag_ids)
+        # Re-fetch rather than trust `body` alone: a title-only rename regenerates the slug
+        # even when `published` wasn't part of this patch, and both the old and new slug's
+        # cached pages need to drop.
+        new_row = db.get_post(conn, post_id, uid)
+        tags_to_bust = {TAG_POSTS_ALL, tag_posts_user(username)}
+        if was_published:
+            tags_to_bust.add(tag_post(username, current["slug"]))
+        if new_row["published"]:
+            tags_to_bust.add(tag_post(username, new_row["slug"]))
+        revalidate(*tags_to_bust)
     return {"ok": True}
 
 
@@ -113,8 +140,13 @@ def update_post(post_id: int, body: UpdatePostBody, request: Request):
 def delete_post(post_id: int, request: Request):
     conn = get_conn(request)
     uid = get_user_id(request)
-    if not db.delete_post(conn, post_id, uid):
+    current = db.get_post(conn, post_id, uid)
+    if current is None:
         raise HTTPException(status_code=404, detail="Post not found")
+    db.delete_post(conn, post_id, uid)
+    if current.get("published"):
+        username = get_username(request)
+        revalidate(TAG_POSTS_ALL, tag_posts_user(username), tag_post(username, current["slug"]))
     return {"ok": True}
 
 

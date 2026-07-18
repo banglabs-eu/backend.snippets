@@ -6,7 +6,8 @@ from pydantic import BaseModel
 
 import anki_export
 import db
-from deps import get_conn, get_user_id, to_dict, to_list
+from deps import get_conn, get_user_id, get_username, to_dict, to_list
+from revalidate import TAG_DASHBOARD_GLOBAL, revalidate, tag_dashboard_user, tag_snippet
 
 
 router = APIRouter(prefix="/snippets")
@@ -44,6 +45,10 @@ class PublishSnippetBody(BaseModel):
 
 class AddTagToSnippetBody(BaseModel):
     tag_id: int
+
+
+def _revalidate_public_snippet(username: str, snippet_id: int) -> None:
+    revalidate(tag_snippet(username, snippet_id), tag_dashboard_user(username), TAG_DASHBOARD_GLOBAL)
 
 
 # --- Endpoints ---
@@ -160,11 +165,14 @@ def get_snippet(snippet_id: int, request: Request):
 def update_snippet_source(snippet_id: int, body: UpdateSnippetSourceBody, request: Request):
     conn = get_conn(request)
     uid = get_user_id(request)
-    if db.get_snippet(conn, snippet_id, uid) is None:
+    snippet = db.get_snippet(conn, snippet_id, uid)
+    if snippet is None:
         raise HTTPException(status_code=404, detail="Snippet not found")
     if db.get_source(conn, body.source_id, uid) is None:
         raise HTTPException(status_code=404, detail="Source not found")
     db.update_snippet_source(conn, snippet_id, body.source_id, uid)
+    if snippet["published"]:
+        _revalidate_public_snippet(get_username(request), snippet_id)
     return {"ok": True}
 
 
@@ -172,9 +180,12 @@ def update_snippet_source(snippet_id: int, body: UpdateSnippetSourceBody, reques
 def update_snippet_body(snippet_id: int, body: UpdateSnippetBodyRequest, request: Request):
     conn = get_conn(request)
     uid = get_user_id(request)
-    if db.get_snippet(conn, snippet_id, uid) is None:
+    snippet = db.get_snippet(conn, snippet_id, uid)
+    if snippet is None:
         raise HTTPException(status_code=404, detail="Snippet not found")
     db.update_snippet_body(conn, snippet_id, body.body, uid)
+    if snippet["published"]:
+        _revalidate_public_snippet(get_username(request), snippet_id)
     return {"ok": True}
 
 
@@ -204,6 +215,7 @@ def publish_snippet(snippet_id: int, body: PublishSnippetBody, request: Request)
     uid = get_user_id(request)
     if not db.publish_snippet(conn, snippet_id, uid, body.public_tag_ids):
         raise HTTPException(status_code=404, detail="Snippet not found")
+    _revalidate_public_snippet(get_username(request), snippet_id)
     return {"ok": True}
 
 
@@ -213,6 +225,7 @@ def unpublish_snippet(snippet_id: int, request: Request):
     uid = get_user_id(request)
     if not db.unpublish_snippet(conn, snippet_id, uid):
         raise HTTPException(status_code=404, detail="Snippet not found")
+    _revalidate_public_snippet(get_username(request), snippet_id)
     return {"ok": True}
 
 
@@ -220,9 +233,12 @@ def unpublish_snippet(snippet_id: int, request: Request):
 def delete_snippet(snippet_id: int, request: Request):
     conn = get_conn(request)
     uid = get_user_id(request)
-    if db.get_snippet(conn, snippet_id, uid) is None:
+    snippet = db.get_snippet(conn, snippet_id, uid)
+    if snippet is None:
         raise HTTPException(status_code=404, detail="Snippet not found")
     db.delete_snippet(conn, snippet_id, uid)
+    if snippet["published"]:
+        _revalidate_public_snippet(get_username(request), snippet_id)
     return {"ok": True}
 
 
