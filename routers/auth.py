@@ -1,4 +1,16 @@
-"""Auth endpoints: register, login, Google OAuth, magic link, password change, me, logout."""
+"""Auth endpoints: register, login, Google OAuth, magic link, password change, me, logout.
+
+/login and /register verify against the shared accounts.bang-labs.eu identity
+service (see /home/adam/Bang-Labs/CLAUDE.md) instead of this table's own
+password_hash — full cutover, no local-password fallback. Known gap: the
+Google OAuth, magic-link, /auth/set-password, and /change-password flows
+below were NOT migrated (out of scope of the login-unification this cutover
+was for) — they still read/write this table's local password_hash/google_id
+directly. A user who only ever signs in via magic-link + set-password (never
+through /register or /login with an accounts-linked identity) ends up with a
+password /login will never check, since it has no accounts_user_id. Revisit
+if passwordless/Google signup is actually in active use.
+"""
 
 import logging
 import os
@@ -6,6 +18,7 @@ import re
 import secrets
 from datetime import datetime, timedelta, timezone
 
+import requests
 from fastapi import APIRouter, HTTPException, Query, Request
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token as google_id_token
@@ -24,6 +37,67 @@ log = logging.getLogger(__name__)
 _GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
 _MAGIC_LINK_BASE_URL = os.environ.get("MAGIC_LINK_BASE_URL", "http://localhost:5173").rstrip("/")
 _MAGIC_LINK_TTL_MINUTES = int(os.environ.get("MAGIC_LINK_TTL_MINUTES", "10"))
+
+# accounts.bang-labs.eu is the shared identity service across every Bang Labs
+# site (see /home/adam/Bang-Labs/CLAUDE.md) — /login and /register verify
+# against it instead of this table's own password_hash, so the same username
+# + password works on Snippets and Basen alike. Loopback, not the public
+# hostname: this is a server-to-server call, no need to round-trip Cloudflare.
+_ACCOUNTS_URL = os.environ.get("ACCOUNTS_URL", "http://127.0.0.1:8010")
+
+
+def _verify_accounts_login(username: str, password: str) -> dict | None:
+    """Check credentials against accounts.bang-labs.eu. Returns
+    {"user_id", "username"} on success, None on bad credentials or if the
+    service is unreachable (fails closed — same as a wrong password)."""
+    try:
+        resp = requests.post(
+            f"{_ACCOUNTS_URL}/login",
+            json={"username": username, "password": password},
+            timeout=5,
+        )
+    except requests.RequestException:
+        log.warning("accounts service unreachable during login", exc_info=True)
+        return None
+    if resp.status_code != 200:
+        return None
+    data = resp.json()
+    return {"user_id": data["user_id"], "username": data["username"]}
+
+
+def _register_accounts_identity(username: str, password: str) -> dict:
+    """Create the shared accounts identity for a brand-new Snippets signup.
+    Raises HTTPException(409) if that username is already taken there —
+    accounts enforces global uniqueness across every Bang Labs site."""
+    try:
+        resp = requests.post(
+            f"{_ACCOUNTS_URL}/register",
+            json={"username": username, "password": password},
+            timeout=5,
+        )
+    except requests.RequestException:
+        log.warning("accounts service unreachable during register", exc_info=True)
+        raise HTTPException(status_code=503, detail="Identity service unavailable, try again shortly")
+    if resp.status_code == 409:
+        raise HTTPException(status_code=409, detail="That username is already taken (shared across Bang Labs sites)")
+    if resp.status_code != 200:
+        raise HTTPException(status_code=400, detail=resp.json().get("detail", "Could not create account"))
+    data = resp.json()
+    return {"user_id": data["user_id"], "username": data["username"]}
+
+
+def _get_or_link_user(conn, accounts_user_id: int, username: str) -> dict | None:
+    """Resolve an accounts-verified login to this app's own user row: already
+    linked, or an existing pre-cutover row matched by username (linked on the
+    spot). Unlike Basen, does NOT auto-provision — Snippets stays invite-gated,
+    so an accounts identity with no matching local row simply can't log in."""
+    user = db.get_user_by_accounts_id(conn, accounts_user_id)
+    if user:
+        return user
+    existing = db.get_user_by_username(conn, username)
+    if existing and existing["accounts_user_id"] is None:
+        return db.link_accounts_id(conn, existing["id"], accounts_user_id)
+    return None
 
 
 # --- Models ---
@@ -85,14 +159,17 @@ def register(body: RegisterBody, request: Request):
     conn = get_conn(request)
     if len(body.password) < 6:
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
-    if not body.username.strip():
+    username = body.username.strip()
+    if not username:
         raise HTTPException(status_code=400, detail="Username required")
     if not db.is_invite_code_valid(conn, body.invite_code):
         raise HTTPException(status_code=400, detail="Invalid or already used invite code")
-    if db.get_user_by_username(conn, body.username.strip()):
+    if db.get_user_by_username(conn, username):
         raise HTTPException(status_code=409, detail="Username already taken")
-    password_hash = auth.hash_password(body.password)
-    user = db.create_user(conn, body.username.strip(), password_hash)
+    # Invite validated before touching accounts — no point minting a shared
+    # identity for a signup that's about to be rejected anyway.
+    accounts_user = _register_accounts_identity(username, body.password)
+    user = db.create_user_from_accounts(conn, accounts_user["username"], accounts_user["user_id"])
     if not db.validate_and_use_invite_code(conn, body.invite_code, user["id"]):
         db.delete_user(conn, user["id"])
         raise HTTPException(status_code=400, detail="Invalid or already used invite code")
@@ -109,8 +186,9 @@ def login(body: LoginBody, request: Request):
             status_code=429,
             detail=f"Too many failed attempts. Try again in {db.LOCKOUT_MINUTES} minutes.",
         )
-    user = db.get_user_by_username(conn, username)
-    if not user or not user["password_hash"] or not auth.verify_password(body.password, user["password_hash"]):
+    accounts_user = _verify_accounts_login(username, body.password)
+    user = accounts_user and _get_or_link_user(conn, accounts_user["user_id"], accounts_user["username"])
+    if not user:
         db.record_failed_login(conn, username)
         raise HTTPException(status_code=401, detail="Invalid username or password")
     db.clear_failed_attempts(conn, username)

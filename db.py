@@ -92,6 +92,42 @@ def delete_user(conn, user_id: int):
     conn.commit()
 
 
+# --- accounts.bang-labs.eu SSO linkage ---
+
+def get_user_by_accounts_id(conn, accounts_user_id: int) -> dict | None:
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users WHERE accounts_user_id = %s", (accounts_user_id,))
+    return cur.fetchone()
+
+
+def link_accounts_id(conn, user_id: int, accounts_user_id: int) -> dict:
+    """Backfill: an existing pre-cutover row gets linked to the accounts
+    identity of the same username, the first time that person logs in
+    post-cutover."""
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE users SET accounts_user_id = %s WHERE id = %s RETURNING *",
+        (accounts_user_id, user_id),
+    )
+    row = cur.fetchone()
+    conn.commit()
+    return row
+
+
+def create_user_from_accounts(conn, username: str, accounts_user_id: int) -> dict:
+    """New signup: invite already validated, accounts identity already
+    created — link the two. No local password; accounts owns that now."""
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO users (username, password_hash, accounts_user_id) VALUES (%s, NULL, %s) "
+        "RETURNING id, username, created_at",
+        (username, accounts_user_id),
+    )
+    row = cur.fetchone()
+    conn.commit()
+    return row
+
+
 def update_user_password(conn, user_id: int, password_hash: str):
     cur = conn.cursor()
     cur.execute("UPDATE users SET password_hash = %s WHERE id = %s", (password_hash, user_id))

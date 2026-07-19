@@ -362,3 +362,18 @@ BEGIN
         INSERT INTO schema_version (version) VALUES (17);
     END IF;
 END $$;
+
+-- === Migration v18: SSO cutover to accounts.bang-labs.eu ===
+-- Identity now lives in the shared accounts service (see
+-- /home/adam/Bang-Labs/CLAUDE.md); /login and /register verify against it
+-- instead of this table's own password_hash. Existing rows link to their
+-- accounts identity by username on first post-cutover login (see
+-- get_or_link_user_by_accounts in db.py) rather than a bulk backfill here.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS accounts_user_id INTEGER UNIQUE;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_version WHERE version = 18) THEN
+        INSERT INTO schema_version (version) VALUES (18);
+    END IF;
+END $$;

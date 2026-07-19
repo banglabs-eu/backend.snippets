@@ -150,17 +150,58 @@ def db_conn():
 import bcrypt  # noqa: E402 — after env is set so test secret takes effect
 
 
+@pytest.fixture(autouse=True)
+def fake_accounts_service(monkeypatch):
+    """/login and /register now verify against the shared accounts.bang-labs.eu
+    service instead of this table's own password_hash (see routers/auth.py).
+    Tests must never hit the real one — it's a live, shared identity store for
+    every Bang Labs site, not a per-test-run sandbox. This stubs just enough
+    of its contract (username+password -> {user_id, username}, global
+    username uniqueness) for the auth flows under test, scoped to one test via
+    monkeypatch's auto-undo."""
+    import routers.auth as auth_router
+    from fastapi import HTTPException
+
+    store: dict[str, dict] = {}
+    counter = {"n": 1000}
+
+    def _register(username, password):
+        if username in store:
+            raise HTTPException(status_code=409, detail="Username already taken")
+        counter["n"] += 1
+        store[username] = {
+            "user_id": counter["n"],
+            "password_hash": bcrypt.hashpw(password.encode(), bcrypt.gensalt()),
+        }
+        return {"user_id": store[username]["user_id"], "username": username}
+
+    def _verify_login(username, password):
+        entry = store.get(username)
+        if not entry or not bcrypt.checkpw(password.encode(), entry["password_hash"]):
+            return None
+        return {"user_id": entry["user_id"], "username": username}
+
+    monkeypatch.setattr(auth_router, "_register_accounts_identity", _register)
+    monkeypatch.setattr(auth_router, "_verify_accounts_login", _verify_login)
+
+    class FakeAccounts:
+        register = staticmethod(_register)
+
+    yield FakeAccounts()
+
+
 @pytest.fixture
-def make_user(db_conn):
-    """Factory to insert a user directly with a known password. Returns (user_id, username)."""
+def make_user(db_conn, fake_accounts_service):
+    """Factory to create a user with a known password — linked to a fake
+    accounts identity, same as a real post-cutover signup. Returns (user_id, username)."""
     created: list[int] = []
 
     def _make(username: str = "alice", password: str = "test-password"):
-        pw_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+        accounts_user = fake_accounts_service.register(username, password)
         with db_conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO users (username, password_hash) VALUES (%s, %s) RETURNING id",
-                (username, pw_hash),
+                "INSERT INTO users (username, password_hash, accounts_user_id) VALUES (%s, NULL, %s) RETURNING id",
+                (username, accounts_user["user_id"]),
             )
             uid = cur.fetchone()[0]
         db_conn.commit()
