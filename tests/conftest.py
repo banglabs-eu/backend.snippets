@@ -181,7 +181,10 @@ def fake_accounts_service(monkeypatch):
             return None
         return {"user_id": entry["user_id"], "username": username}
 
-    monkeypatch.setattr(auth_router, "_register_accounts_identity", _register)
+    # /register now proves an accounts login already exists rather than creating
+    # one (accounts itself dropped one-shot creation for a 3-step email-verify
+    # flow) — so only _verify_accounts_login needs patching onto the module.
+    # _register below is purely this fixture's own way of seeding the fake store.
     monkeypatch.setattr(auth_router, "_verify_accounts_login", _verify_login)
 
     class FakeAccounts:

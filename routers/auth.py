@@ -65,27 +65,6 @@ def _verify_accounts_login(username: str, password: str) -> dict | None:
     return {"user_id": data["user_id"], "username": data["username"]}
 
 
-def _register_accounts_identity(username: str, password: str) -> dict:
-    """Create the shared accounts identity for a brand-new Snippets signup.
-    Raises HTTPException(409) if that username is already taken there —
-    accounts enforces global uniqueness across every Bang Labs site."""
-    try:
-        resp = requests.post(
-            f"{_ACCOUNTS_URL}/register",
-            json={"username": username, "password": password},
-            timeout=5,
-        )
-    except requests.RequestException:
-        log.warning("accounts service unreachable during register", exc_info=True)
-        raise HTTPException(status_code=503, detail="Identity service unavailable, try again shortly")
-    if resp.status_code == 409:
-        raise HTTPException(status_code=409, detail="That username is already taken (shared across Bang Labs sites)")
-    if resp.status_code != 200:
-        raise HTTPException(status_code=400, detail=resp.json().get("detail", "Could not create account"))
-    data = resp.json()
-    return {"user_id": data["user_id"], "username": data["username"]}
-
-
 def _get_or_link_user(conn, accounts_user_id: int, username: str) -> dict | None:
     """Resolve an accounts-verified login to this app's own user row: already
     linked, or an existing pre-cutover row matched by username (linked on the
@@ -156,9 +135,13 @@ def _validate_username(username: str) -> str:
 
 @router.post("/register")
 def register(body: RegisterBody, request: Request):
+    """accounts.bang-labs.eu no longer offers one-shot identity creation — it's
+    a 3-step email-verify-code flow (POST /register/start|verify|complete on
+    that service directly, see /home/adam/Bang-Labs/CLAUDE.md). So this proves
+    the caller already completed that flow (an accounts login, not a create),
+    then does the invite-gated part that's actually Snippets-specific: linking
+    that identity to a new local row."""
     conn = get_conn(request)
-    if len(body.password) < 6:
-        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
     username = body.username.strip()
     if not username:
         raise HTTPException(status_code=400, detail="Username required")
@@ -166,9 +149,18 @@ def register(body: RegisterBody, request: Request):
         raise HTTPException(status_code=400, detail="Invalid or already used invite code")
     if db.get_user_by_username(conn, username):
         raise HTTPException(status_code=409, detail="Username already taken")
-    # Invite validated before touching accounts — no point minting a shared
-    # identity for a signup that's about to be rejected anyway.
-    accounts_user = _register_accounts_identity(username, body.password)
+
+    accounts_user = _verify_accounts_login(username, body.password)
+    if not accounts_user:
+        raise HTTPException(
+            status_code=401,
+            detail=(
+                "No accounts.bang-labs.eu login found for that username/password. "
+                "Register there first (email verification required), then come back "
+                "here with your invite code."
+            ),
+        )
+
     user = db.create_user_from_accounts(conn, accounts_user["username"], accounts_user["user_id"])
     if not db.validate_and_use_invite_code(conn, body.invite_code, user["id"]):
         db.delete_user(conn, user["id"])
